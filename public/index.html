@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1f4ed8" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="훈련생 포털" />
+    <title>대전 훈련생 포털</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="#home">대전 훈련생 포털</a>
+      <div class="who" id="who"></div>
+    </header>
+    <div id="banner"></div>
+    <main id="view" aria-live="polite"><p class="muted center pad">불러오는 중…</p></main>
+    <nav class="tabs" id="tabs" hidden>
+      <a href="#home" data-tab="home"><span aria-hidden="true">🏠</span>홈</a>
+      <a href="#notice" data-tab="notice"><span aria-hidden="true">📅</span>출결 알림</a>
+      <a href="#out" data-tab="out"><span aria-hidden="true">🚶</span>외출</a>
+      <a href="#lunch" data-tab="lunch"><span aria-hidden="true">🍚</span>점심</a>
+      <a href="#qna" data-tab="qna"><span aria-hidden="true">💬</span>문의</a>
+    </nav>
+    <div id="toast" role="status"></div>
+  </body>
+</html>

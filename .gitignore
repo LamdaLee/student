@@ -1,0 +1,9 @@
+node_modules/
+.local/
+*.sqlite
+*.sqlite-*
+.env
+.env.*
+!.env.example
+.vercel/
+.DS_Store
