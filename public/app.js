@@ -531,17 +531,17 @@ async function renderLunch() {
       toast(id ? "점심을 정했습니다." : "선택을 취소했습니다.");
       renderLunch();
     });
-  const sorted = [...r.restaurants].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "ko"));
+  const label = (x) => [x.num ? h("span", { class: "num" }, x.num) : null, h("strong", {}, x.name)];
   const randomBox = h("div", { class: "random" });
   const roll = () => {
     if (!r.restaurants.length) return;
     const choice = r.restaurants[Math.floor(Math.random() * r.restaurants.length)];
     randomBox.replaceChildren(
-      h("p", {}, "🎲 오늘은 ", h("strong", {}, choice.name), choice.category ? ` (${choice.category})` : "", " 어때요?"),
+      h("p", { class: "row" }, "🎲 오늘은 ", label(choice), choice.category ? ` (${choice.category})` : "", " 어때요?"),
       h("div", { class: "row-btns" }, h("button", { class: "btn primary small", onclick: pick(choice.id) }, "여기로 정하기"), h("button", { class: "btn small", onclick: roll }, "다시 뽑기")),
     );
   };
-  const cards = sorted.map((x) => {
+  const cards = r.restaurants.map((x) => {
     const mine = x.id === r.myPick;
     const classes = Object.entries(x.byClass).map(([c, n]) => `${c} ${n}`).join(" · ");
     return h(
@@ -550,7 +550,7 @@ async function renderLunch() {
       h(
         "div",
         { class: "row" },
-        h("div", { class: "grow" }, h("strong", {}, x.name), " ", h("span", { class: "muted small" }, x.category)),
+        h("div", { class: "grow row" }, label(x), h("span", { class: "muted small" }, x.category)),
         h("span", { class: "count" }, `${x.count}명`),
       ),
       x.count ? h("p", { class: "muted small" }, classes, " — ", x.people.map((p) => p.name).join(", ")) : null,
@@ -560,13 +560,29 @@ async function renderLunch() {
         mine
           ? h("button", { class: "btn small", onclick: pick(null) }, "선택 취소")
           : h("button", { class: "btn primary small", onclick: pick(x.id) }, r.myPick ? "여기로 바꾸기" : "여기 갈래요"),
-        x.mapUrl ? h("a", { class: "btn small", href: x.mapUrl, target: "_blank", rel: "noopener" }, "지도") : null,
+        x.mapUrl ? h("a", { class: "btn small", href: x.mapUrl, target: "_blank", rel: "noopener" }, "네이버 지도") : null,
       ),
     );
   });
-  const name = h("input", { placeholder: "식당 이름", maxlength: "40", required: true });
-  const category = h("input", { placeholder: "종류 예) 한식, 분식", maxlength: "20" });
-  const mapUrl = h("input", { type: "url", placeholder: "지도 링크 (선택)", maxlength: "500" });
+  let mapOpen = true;
+  try {
+    mapOpen = localStorage.getItem("lunch-map") !== "closed";
+  } catch {}
+  const map = h(
+    "details",
+    {
+      class: "card map",
+      open: mapOpen,
+      ontoggle: (ev) => {
+        try {
+          localStorage.setItem("lunch-map", ev.currentTarget.open ? "open" : "closed");
+        } catch {}
+      },
+    },
+    h("summary", {}, "📍 식당 약도 (교육센터 주변)"),
+    h("a", { href: "/lunch-map.jpg", target: "_blank", rel: "noopener" }, h("img", { src: "/lunch-map.jpg", alt: "예람인재교육센터 주변 점심 식당 약도. 번호는 아래 식당 목록 번호와 같습니다.", loading: "lazy", width: "1000", height: "1414" })),
+    h("p", { class: "muted small" }, "그림을 누르면 크게 볼 수 있어요. 점심은 약도에 있는 식당에서만 이용할 수 있습니다."),
+  );
   page(
     "오늘 점심",
     h("p", { class: "muted sub" }, `${fmtDay(r.today)} · 누가 어디 가는지 보고 같이 정해요.`),
@@ -576,26 +592,8 @@ async function renderLunch() {
       h("button", { class: "btn block", onclick: roll, disabled: !r.restaurants.length }, "🎲 메뉴 고민될 때 무작위로 뽑기"),
       randomBox,
     ),
-    cards.length ? h("ul", { class: "restaurants" }, cards) : h("p", { class: "card muted" }, "아직 등록된 식당이 없습니다. 아래에서 추가해 주세요."),
-    h(
-      "details",
-      { class: "card" },
-      h("summary", {}, "식당 추가하기"),
-      h(
-        "form",
-        {
-          onsubmit: action(async () => {
-            await api("/api/restaurants", { name: name.value, category: category.value, mapUrl: mapUrl.value });
-            toast("식당을 추가했습니다.");
-            renderLunch();
-          }),
-        },
-        name,
-        category,
-        mapUrl,
-        h("button", { class: "btn" }, "추가"),
-      ),
-    ),
+    cards.length ? h("ul", { class: "restaurants" }, cards) : h("p", { class: "card muted" }, "지금 이용할 수 있는 식당이 없습니다."),
+    map,
   );
 }
 
@@ -976,61 +974,86 @@ async function adminMembers(body) {
 
 async function adminRestaurants(body) {
   const r = await api("/api/admin/restaurants");
+  const fields = (x = {}) => ({
+    num: h("input", { type: "number", min: "0", max: "99", inputmode: "numeric", value: x.num ?? "", placeholder: "약도 번호" }),
+    name: h("input", { value: x.name ?? "", maxlength: "40", required: true, placeholder: "식당 이름" }),
+    category: h("input", { value: x.category ?? "", maxlength: "20", placeholder: "종류 예) 한식" }),
+    mapUrl: h("input", { type: "url", value: x.mapUrl ?? "", placeholder: "지도 링크", maxlength: "500" }),
+  });
+  const labeled = (f) => [
+    h("label", { class: "field" }, h("span", {}, "약도 번호"), f.num),
+    h("label", { class: "field" }, h("span", {}, "식당 이름"), f.name),
+    h("label", { class: "field" }, h("span", {}, "종류"), f.category),
+    h("label", { class: "field" }, h("span", {}, "지도 링크"), f.mapUrl),
+  ];
+  const values = (f) => ({ num: Number(f.num.value || 0), name: f.name.value, category: f.category.value, mapUrl: f.mapUrl.value });
+  const nf = fields();
   body.replaceChildren(
-    h("p", { class: "muted small" }, "식당은 훈련생도 점심 화면에서 추가할 수 있습니다. 문을 닫았거나 중복된 식당은 숨겨 주세요."),
+    h("p", { class: "muted small" }, "점심은 정해진 식당에서만 가능해서 식당 추가·수정은 운영진만 할 수 있습니다. 번호는 약도의 번호와 맞춰 주세요. 문을 닫은 식당은 숨기면 됩니다."),
     h(
       "section",
       { class: "card" },
-      r.restaurants.length
-        ? h(
-            "ul",
-            { class: "list" },
-            r.restaurants.map((x) => {
-              const name = h("input", { value: x.name, maxlength: "40", required: true });
-              const category = h("input", { value: x.category, maxlength: "20" });
-              const mapUrl = h("input", { type: "url", value: x.mapUrl, placeholder: "지도 링크", maxlength: "500" });
-              return h(
-                "li",
-                { class: `member${x.active ? "" : " inactive"}` },
+      h(
+        "ul",
+        { class: "list" },
+        r.restaurants.map((x) => {
+          const f = fields(x);
+          return h(
+            "li",
+            { class: `member${x.active ? "" : " inactive"}` },
+            h(
+              "details",
+              {},
+              h("summary", {}, x.num ? h("span", { class: "num" }, x.num) : null, " ", x.name, " ", h("span", { class: "muted small" }, x.category, x.active ? "" : " · 숨김")),
+              h(
+                "form",
+                {
+                  onsubmit: action(async () => {
+                    await api(`/api/admin/restaurants/${x.id}`, values(f));
+                    toast("저장했습니다.");
+                    adminRestaurants(body);
+                  }),
+                },
+                labeled(f),
                 h(
-                  "details",
-                  {},
-                  h("summary", {}, x.name, " ", h("span", { class: "muted small" }, x.category, x.active ? "" : " · 숨김")),
+                  "div",
+                  { class: "row-btns" },
+                  h("button", { class: "btn primary small" }, "저장"),
                   h(
-                    "form",
+                    "button",
                     {
-                      onsubmit: action(async () => {
-                        await api(`/api/admin/restaurants/${x.id}`, { name: name.value, category: category.value, mapUrl: mapUrl.value });
-                        toast("저장했습니다.");
+                      type: "button",
+                      class: "btn small",
+                      onclick: action(async () => {
+                        await api(`/api/admin/restaurants/${x.id}`, { active: !x.active });
                         adminRestaurants(body);
                       }),
                     },
-                    name,
-                    category,
-                    mapUrl,
-                    h(
-                      "div",
-                      { class: "row-btns" },
-                      h("button", { class: "btn primary small" }, "저장"),
-                      h(
-                        "button",
-                        {
-                          type: "button",
-                          class: "btn small",
-                          onclick: action(async () => {
-                            await api(`/api/admin/restaurants/${x.id}`, { active: !x.active });
-                            adminRestaurants(body);
-                          }),
-                        },
-                        x.active ? "숨기기" : "다시 보이기",
-                      ),
-                    ),
+                    x.active ? "숨기기" : "다시 보이기",
                   ),
                 ),
-              );
-            }),
-          )
-        : h("p", { class: "muted" }, "등록된 식당이 없습니다. 점심 화면에서 추가할 수 있습니다."),
+              ),
+            ),
+          );
+        }),
+      ),
+    ),
+    h(
+      "details",
+      { class: "card" },
+      h("summary", {}, "식당 추가"),
+      h(
+        "form",
+        {
+          onsubmit: action(async () => {
+            await api("/api/admin/restaurants", values(nf));
+            toast("추가했습니다.");
+            adminRestaurants(body);
+          }),
+        },
+        labeled(nf),
+        h("button", { class: "btn primary" }, "추가"),
+      ),
     ),
   );
 }
