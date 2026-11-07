@@ -3,10 +3,54 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { randomBytes } from "node:crypto";
 import { openDb } from "../lib/db.js";
-import { createApp, kstDay, normalizeCode } from "../lib/app.js";
+import { createApp, kstDay } from "../lib/app.js";
+import { createLunchpassClient, LunchpassError, verifyRequest, verifyToken } from "../lib/lunchpass.js";
 
 // 한국 시간 2026-11-09(월) 10:00
 const T0 = Date.parse("2026-11-09T01:00:00Z");
+const PW = "pw-123456789";
+
+// 런치패스 서버 대신 쓰는 가짜(계정 저장소). 실제 서명·HTTP 는 아래 별도 테스트에서 확인합니다.
+function fakeLunchpass() {
+  const byLogin = new Map();
+  let nextId = 1;
+  const state = { down: false };
+  const pub = (u) => ({ id: u.id, name: u.name, loginId: u.loginId, track: u.track, role: u.role, mustChange: u.mustChange });
+  const check = () => {
+    if (state.down) throw new LunchpassError(502, "런치패스에 연결하지 못했습니다.");
+  };
+  const auth = (loginId, password) => {
+    const u = byLogin.get(loginId);
+    if (!u || !u.active || u.password !== password) throw new LunchpassError(401, "학번/ID 또는 비밀번호를 확인해주세요.");
+    return u;
+  };
+  return {
+    state,
+    url: "https://lunch.example.com",
+    add(name, loginId, track, { role = "member", password = PW, mustChange = false } = {}) {
+      const u = { id: nextId++, name, loginId, track, role, password, mustChange, active: true };
+      byLogin.set(loginId, u);
+      return u;
+    },
+    get: (loginId) => byLogin.get(loginId),
+    async login(loginId, password) {
+      check();
+      return pub(auth(loginId, password));
+    },
+    async changePassword(loginId, password, newPassword) {
+      check();
+      const u = auth(loginId, password);
+      u.password = newPassword;
+      u.mustChange = false;
+      return pub(u);
+    },
+    async users(id) {
+      check();
+      return [...byLogin.values()].filter((u) => u.active && (id == null || u.id === id)).map(pub);
+    },
+    enterUrl: (id) => `https://lunch.example.com/api/portal/enter?token=for-${id}`,
+  };
+}
 
 async function setup(kind) {
   let db;
@@ -23,7 +67,8 @@ async function setup(kind) {
     db = await openDb({ url: "", file: ":memory:" });
   }
   const clock = { t: T0 };
-  const app = createApp(db, { now: () => clock.t, setupKey: "test-setup-key-123456789012", secret: "s".repeat(32), secureCookie: false });
+  const lp = fakeLunchpass();
+  const app = createApp(db, { now: () => clock.t, lunchpass: lp, secureCookie: false });
   const call = async (method, path, body, { cookie, ip = "1.1.1.1", headers = {} } = {}) => {
     const payload = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
     const req = Readable.from(payload);
@@ -50,7 +95,18 @@ async function setup(kind) {
       },
     });
     const setCookie = res.headers["Set-Cookie"];
-    return { status: res.status, json: JSON.parse(res.body), cookie: setCookie ? setCookie.split(";")[0] : undefined, setCookie };
+    return {
+      status: res.status,
+      json: res.body ? JSON.parse(res.body) : null,
+      location: res.headers.Location,
+      cookie: setCookie ? setCookie.split(";")[0] : undefined,
+      setCookie,
+    };
+  };
+  const login = async (loginId, password = PW) => {
+    const r = await call("POST", "/api/auth/login", { loginId, password });
+    if (r.status !== 200 || !r.cookie) throw new Error(JSON.stringify(r));
+    return r.cookie;
   };
   const cleanup = async () => {
     await db.close();
@@ -59,66 +115,49 @@ async function setup(kind) {
       await admin.end();
     }
   };
-  return { db, call, clock, cleanup };
+  return { db, call, clock, lp, login, cleanup };
 }
 
 for (const kind of ["sqlite", "postgres"]) {
   describe(kind, { skip: kind === "postgres" && !process.env.TEST_DATABASE_URL && "TEST_DATABASE_URL 없음" }, () => {
-    let t, staff, dm, ax, codes;
+    let t, staff, dm, ax;
     before(async () => {
       t = await setup(kind);
+      t.lp.add("김운영", "admin", "OTHER", { role: "admin" });
+      t.lp.add("홍길동", "dm001", "DM");
+      t.lp.add("김철수", "ax001", "AX");
+      t.lp.add("새학생", "dm002", "DM", { password: "1234", mustChange: true });
+      t.lp.add("SF학생", "sf001", "SF");
     });
     after(async () => t?.cleanup());
 
-    test("미인증 상태에서는 최초 운영진 등록만 보인다", async () => {
+    test("로그인 전에는 아무것도 볼 수 없다", async () => {
       const r = await t.call("GET", "/api/me");
       assert.equal(r.status, 401);
-      assert.equal(r.json.setup, true);
+      assert.equal(r.json.lunchpassUrl, "https://lunch.example.com");
       assert.equal((await t.call("GET", "/api/notices")).status, 401);
     });
 
-    test("최초 운영진 등록은 설정 키가 맞아야 하고 한 번만 된다", async () => {
-      assert.equal((await t.call("POST", "/api/setup", { key: "wrong", name: "운영" })).status, 400);
-      const r = await t.call("POST", "/api/setup", { key: "test-setup-key-123456789012", name: "김운영" });
+    test("런치패스 학번·비밀번호로 로그인하면 쿠키로 계속 쓴다", async () => {
+      const bad = await t.call("POST", "/api/auth/login", { loginId: "dm001", password: "wrong" });
+      assert.equal(bad.status, 401);
+      assert.equal(bad.json.error, "학번/ID 또는 비밀번호를 확인해주세요.");
+      assert.equal(bad.cookie, undefined);
+
+      const r = await t.call("POST", "/api/auth/login", { loginId: "dm001", password: PW });
       assert.equal(r.status, 200);
-      assert.match(r.json.code, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
       assert.match(r.setCookie, /HttpOnly/);
       assert.match(r.setCookie, /Max-Age=34560000/);
-      staff = r.cookie;
-      const again = await t.call("POST", "/api/setup", { key: "test-setup-key-123456789012", name: "또" });
-      assert.equal(again.status, 403);
-      const me = await t.call("GET", "/api/me", undefined, { cookie: staff });
-      assert.equal(me.json.member.role, "staff");
-      assert.equal(me.json.today, "2026-11-09");
-    });
-
-    test("운영진이 명단을 등록하면 개인 코드가 나오고, 한 번 인증하면 쿠키로 계속 쓴다", async () => {
-      const bad = await t.call("POST", "/api/admin/members", { entries: [{ name: "가", class: "SF" }] }, { cookie: staff });
-      assert.equal(bad.status, 400);
-      const r = await t.call(
-        "POST",
-        "/api/admin/members",
-        { entries: [{ name: "홍길동", class: "dm" }, { name: "김철수", class: "AX" }, { name: "홍길동", class: "AX" }] },
-        { cookie: staff },
-      );
-      assert.equal(r.status, 200);
-      assert.equal(r.json.created.length, 3);
-      assert.equal(r.json.created[0].class, "DM");
-      codes = r.json.created.map((c) => c.code);
-      assert.equal(new Set(codes).size, 3);
-
-      const login = await t.call("POST", "/api/auth/redeem", { code: codes[0].toLowerCase().replace("-", " ") });
-      assert.equal(login.status, 200);
-      dm = login.cookie;
-      ax = (await t.call("POST", "/api/auth/redeem", { code: codes[1] })).cookie;
+      dm = r.cookie;
+      ax = await t.login("ax001");
+      staff = await t.login("admin");
       const me = await t.call("GET", "/api/me", undefined, { cookie: dm });
       assert.equal(me.json.member.name, "홍길동");
       assert.equal(me.json.member.class, "DM");
-
-      // 같은 코드로 다른 기기도 등록할 수 있다.
-      assert.equal((await t.call("POST", "/api/auth/redeem", { code: codes[0] })).status, 200);
-
-      // 훈련생은 관리 화면에 못 들어간다.
+      assert.equal(me.json.member.role, "trainee");
+      assert.equal(me.json.today, "2026-11-09");
+      // 런치패스 운영진은 포털 운영진
+      assert.equal((await t.call("GET", "/api/me", undefined, { cookie: staff })).json.member.role, "staff");
       assert.equal((await t.call("GET", "/api/admin/day", undefined, { cookie: dm })).status, 403);
 
       // 오래 지나도 쓰는 동안 연장된다.
@@ -129,16 +168,52 @@ for (const kind of ["sqlite", "postgres"]) {
       t.clock.t = T0;
     });
 
-    test("틀린 코드가 많으면 같은 IP 를 잠시 막는다", async () => {
-      for (let i = 0; i < 30; i++) {
-        const r = await t.call("POST", "/api/auth/redeem", { code: "AAAA-AAAA" }, { ip: "9.9.9.9" });
-        assert.equal(r.status, 400);
-      }
-      assert.equal((await t.call("POST", "/api/auth/redeem", { code: codes[2] }, { ip: "9.9.9.9" })).status, 429);
-      assert.equal((await t.call("POST", "/api/auth/redeem", { code: codes[2] }, { ip: "8.8.8.8" })).status, 200);
-      t.clock.t += 16 * 60000;
-      assert.equal((await t.call("POST", "/api/auth/redeem", { code: codes[2] }, { ip: "9.9.9.9" })).status, 200);
+    test("첫 로그인은 포털에서 새 비밀번호를 정하고 런치패스에도 적용된다", async () => {
+      const first = await t.call("POST", "/api/auth/login", { loginId: "dm002", password: "1234" });
+      assert.equal(first.status, 200);
+      assert.equal(first.json.mustChange, true);
+      assert.equal(first.cookie, undefined);
+      assert.equal((await t.call("POST", "/api/auth/first-password", { loginId: "dm002", password: "1234", newPassword: "short" })).status, 400);
+      assert.equal((await t.call("POST", "/api/auth/first-password", { loginId: "dm002", password: "0000", newPassword: "new-password-1" })).status, 401);
+      const r = await t.call("POST", "/api/auth/first-password", { loginId: "dm002", password: "1234", newPassword: "new-password-1" });
+      assert.equal(r.status, 200);
+      assert.ok(r.cookie);
+      assert.equal(t.lp.get("dm002").password, "new-password-1");
+      assert.equal(t.lp.get("dm002").mustChange, false);
+    });
+
+    test("런치패스에 연결이 안 되면 로그인은 안내만 하고, 이미 로그인한 기기는 계속 쓴다", async () => {
+      t.lp.state.down = true;
+      const r = await t.call("POST", "/api/auth/login", { loginId: "dm001", password: PW });
+      assert.equal(r.status, 502);
+      t.clock.t += 2 * 3600000; // 확인 주기가 지나도
+      assert.equal((await t.call("GET", "/api/me", undefined, { cookie: dm })).status, 200);
+      t.lp.state.down = false;
       t.clock.t = T0;
+    });
+
+    test("한 시간마다 런치패스의 이름·반·운영진 여부를 따라간다", async () => {
+      t.lp.get("ax001").name = "김철수2";
+      t.lp.get("ax001").role = "admin";
+      t.clock.t += 2 * 3600000;
+      let me = await t.call("GET", "/api/me", undefined, { cookie: ax });
+      assert.equal(me.json.member.name, "김철수2");
+      assert.equal(me.json.member.role, "staff");
+      t.lp.get("ax001").name = "김철수";
+      t.lp.get("ax001").role = "member";
+      t.clock.t += 2 * 3600000;
+      me = await t.call("GET", "/api/me", undefined, { cookie: ax });
+      assert.equal(me.json.member.role, "trainee");
+      t.clock.t = T0;
+    });
+
+    test("점심 탭은 런치패스 자동 로그인 주소로 보낸다", async () => {
+      const r = await t.call("GET", "/api/lunchpass/go", undefined, { cookie: dm });
+      assert.equal(r.status, 302);
+      assert.equal(r.location, `https://lunch.example.com/api/portal/enter?token=for-${t.lp.get("dm001").id}`);
+      // 로그인 전이면 포털 첫 화면으로
+      assert.equal((await t.call("GET", "/api/lunchpass/go")).location, "/");
+      assert.equal((await t.call("GET", "/api/lunch", undefined, { cookie: dm })).status, 404);
     });
 
     test("다른 사이트에서 온 요청과 JSON 이 아닌 요청은 거절한다", async () => {
@@ -204,19 +279,6 @@ for (const kind of ["sqlite", "postgres"]) {
       t.clock.t = T0;
     });
 
-    test("점심은 런치패스로 연결한다", async () => {
-      // 포털에는 점심 API 가 없고, 런치패스 주소만 내려준다.
-      assert.equal((await t.call("GET", "/api/lunch", undefined, { cookie: dm })).status, 404);
-      const me = await t.call("GET", "/api/me", undefined, { cookie: dm });
-      assert.equal(me.json.settings.lunchUrl, "https://matzip-lamda7.vercel.app/");
-      assert.equal((await t.call("POST", "/api/admin/settings", { lunchUrl: "javascript:alert(1)" }, { cookie: staff })).status, 400);
-      assert.equal((await t.call("POST", "/api/admin/settings", { lunchUrl: "https://lunch.example.com" }, { cookie: staff })).status, 200);
-      assert.equal((await t.call("GET", "/api/me", undefined, { cookie: dm })).json.settings.lunchUrl, "https://lunch.example.com/");
-      // 비우면 기본 주소로 돌아간다.
-      await t.call("POST", "/api/admin/settings", { lunchUrl: "" }, { cookie: staff });
-      assert.equal((await t.call("GET", "/api/me", undefined, { cookie: dm })).json.settings.lunchUrl, "https://matzip-lamda7.vercel.app/");
-    });
-
     test("문의게시판: 공개·비공개, 답변, 삭제", async () => {
       const pub = await t.call("POST", "/api/posts", { title: "수료 기준?", body: "궁금합니다" }, { cookie: dm });
       const priv = await t.call("POST", "/api/posts", { title: "개인 사정", body: "비밀", private: true }, { cookie: dm });
@@ -241,25 +303,39 @@ for (const kind of ["sqlite", "postgres"]) {
       assert.equal((await t.call("GET", "/api/posts", undefined, { cookie: dm })).json.posts.length, 1);
     });
 
-    test("코드 재발급과 사용 중지는 기존 로그인을 끝낸다", async () => {
-      const members = (await t.call("GET", "/api/admin/members", undefined, { cookie: staff })).json.members;
-      const hong = members.find((m) => m.name === "홍길동" && m.class === "DM");
-      assert.equal(hong.devices, 2);
-      const re = await t.call("POST", `/api/admin/members/${hong.id}/reissue`, {}, { cookie: staff });
-      assert.equal(re.status, 200);
-      assert.equal((await t.call("GET", "/api/me", undefined, { cookie: dm })).status, 401);
-      assert.equal((await t.call("POST", "/api/auth/redeem", { code: codes[0] })).status, 400);
-      dm = (await t.call("POST", "/api/auth/redeem", { code: re.json.code })).cookie;
-      assert.equal((await t.call("GET", "/api/me", undefined, { cookie: dm })).status, 200);
+    test("명단: 런치패스 명단과 포털 사용 현황, 포털 사용 중지", async () => {
+      const r = await t.call("GET", "/api/admin/members", undefined, { cookie: staff });
+      assert.equal(r.status, 200);
+      assert.equal(r.json.lunchpassOk, true);
+      const byLogin = Object.fromEntries(r.json.members.map((m) => [m.loginId, m]));
+      assert.equal(byLogin.dm001.joined, true);
+      assert.equal(byLogin.sf001.joined, false); // 런치패스에는 있지만 포털에는 아직
+      assert.equal(byLogin.sf001.id, null);
+      assert.equal(byLogin.admin.role, "staff");
+      // 훈련생은 볼 수 없다
+      assert.equal((await t.call("GET", "/api/admin/members", undefined, { cookie: dm })).status, 403);
+      // 명단 등록·코드 발급은 포털에 없다
+      assert.equal((await t.call("POST", "/api/admin/members", { entries: [] }, { cookie: staff })).status, 405);
 
-      const kim = members.find((m) => m.name === "김철수");
-      assert.equal((await t.call("POST", `/api/admin/members/${kim.id}/update`, { active: false }, { cookie: staff })).status, 200);
+      // 포털 사용 중지: 기존 로그인이 끝나고 다시 로그인도 안 된다
+      assert.equal((await t.call("POST", `/api/admin/members/${byLogin.ax001.id}/update`, { active: false }, { cookie: staff })).status, 200);
       assert.equal((await t.call("GET", "/api/me", undefined, { cookie: ax })).status, 401);
-      assert.equal((await t.call("POST", "/api/auth/redeem", { code: codes[1] })).status, 400);
+      assert.equal((await t.call("POST", "/api/auth/login", { loginId: "ax001", password: PW })).status, 403);
+      assert.equal((await t.call("POST", `/api/admin/members/${byLogin.ax001.id}/update`, { active: true }, { cookie: staff })).status, 200);
+      ax = await t.login("ax001");
+      // 나 자신은 중지할 수 없다
+      assert.equal((await t.call("POST", `/api/admin/members/${byLogin.admin.id}/update`, { active: false }, { cookie: staff })).status, 400);
+      // 재적은 런치패스 훈련생 수(운영진·OTHER 제외)
+      const day = await t.call("GET", "/api/admin/day", undefined, { cookie: staff });
+      assert.deepEqual(day.json.roster, { DM: 2, AX: 1, SF: 1 });
+    });
 
-      // 내 권한은 스스로 해제할 수 없다.
-      const me = members.find((m) => m.role === "staff");
-      assert.equal((await t.call("POST", `/api/admin/members/${me.id}/update`, { role: "trainee", class: "DM" }, { cookie: staff })).status, 400);
+    test("런치패스에서 사용 중지된 계정은 다음 확인 때 로그아웃된다", async () => {
+      const temp = await t.login("sf001");
+      t.lp.get("sf001").active = false;
+      t.clock.t += 2 * 3600000;
+      assert.equal((await t.call("GET", "/api/me", undefined, { cookie: temp })).status, 401);
+      t.clock.t = T0;
     });
 
     test("설정: LMS 주소·공지·바로가기", async () => {
@@ -287,15 +363,53 @@ for (const kind of ["sqlite", "postgres"]) {
   });
 }
 
-test("한국 시간 날짜와 코드 정리", () => {
+test("한국 시간 날짜", () => {
   assert.equal(kstDay(Date.parse("2026-11-08T15:00:00Z")), "2026-11-09");
   assert.equal(kstDay(Date.parse("2026-11-08T14:59:59Z")), "2026-11-08");
-  assert.equal(normalizeCode(" ab12-cd34 "), "AB12CD34");
+});
+
+test("런치패스 클라이언트는 요청에 서명하고 자동 로그인 토큰을 만든다", async () => {
+  const secret = "s".repeat(40);
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    const u = new URL(url);
+    seen.push({ path: u.pathname + u.search, init });
+    const ok = verifyRequest(secret, init.method, u.pathname + u.search, init.headers, 1000, init.body || "");
+    if (!ok) return new Response(JSON.stringify({ error: "서명 오류" }), { status: 401 });
+    if (u.pathname === "/api/portal/login") return new Response(JSON.stringify({ user: { id: 7, name: "가", loginId: "x", track: "DM", role: "member", mustChange: false } }));
+    return new Response(JSON.stringify({ users: [] }));
+  };
+  const client = createLunchpassClient({ url: "https://lunch.example.com", secret, fetchImpl, now: () => 1000 });
+  assert.equal((await client.login("x", "pw")).id, 7);
+  assert.deepEqual(await client.users(7), []);
+  assert.equal(seen[1].path, "/api/portal/users?id=7");
+  // 비밀값이 다르면 런치패스가 거절하고, 포털은 안내 문구를 그대로 전달
+  const wrong = createLunchpassClient({ url: "https://lunch.example.com", secret: "t".repeat(40), fetchImpl, now: () => 1000 });
+  await assert.rejects(wrong.login("x", "pw"), (e) => e instanceof LunchpassError && e.status === 401);
+  // 연결 실패는 502
+  const offline = createLunchpassClient({ url: "https://lunch.example.com", secret, fetchImpl: async () => { throw new Error("offline"); } });
+  await assert.rejects(offline.users(), (e) => e.status === 502);
+  // 자동 로그인 토큰
+  const url = new URL(client.enterUrl(7));
+  assert.equal(url.origin + url.pathname, "https://lunch.example.com/api/portal/enter");
+  const payload = verifyToken(secret, "enter", url.searchParams.get("token"), 1000);
+  assert.equal(payload.sub, 7);
+  assert.equal(payload.exp, 1000 + 120000);
+  assert.ok(payload.jti);
+});
+
+test("PORTAL_SECRET 이 없으면 시작하지 않는다", async () => {
+  const db = await openDb({ url: "", file: ":memory:" });
+  const prev = process.env.PORTAL_SECRET;
+  delete process.env.PORTAL_SECRET;
+  assert.throws(() => createApp(db), /PORTAL_SECRET/);
+  if (prev !== undefined) process.env.PORTAL_SECRET = prev;
+  await db.close();
 });
 
 test("Vercel 경로(route 쿼리)로도 동작한다", async () => {
   const db = await openDb({ url: "", file: ":memory:" });
-  const app = createApp(db, { secret: "s".repeat(32), setupKey: "" });
+  const app = createApp(db, { lunchpass: fakeLunchpass() });
   const req = Readable.from([]);
   Object.assign(req, { method: "GET", url: "/api/index?route=api/me", headers: { host: "x" }, socket: {} });
   let status;

@@ -29,7 +29,7 @@ async function api(path, body) {
   try {
     data = await res.json();
   } catch {}
-  if (res.status === 401 && path !== "/api/me") {
+  if (res.status === 401 && state.me && !path.startsWith("/api/auth/")) {
     state.me = null;
     render();
   }
@@ -83,21 +83,14 @@ function addDays(day, n) {
 }
 const KIND_LABEL = { absent: "결석", late: "지각", early: "조퇴" };
 
-const state = { me: null, setup: false };
+const state = { me: null };
+// 런치패스의 'OTHER' 반은 교수·강사·운영진입니다.
+const className = (c) => (c === "OTHER" ? "교수·강사·운영진" : c);
+const chip = (c) => h("span", { class: "chip" }, c === "OTHER" ? "운영" : c);
 const isStaff = () => state.me?.member.role === "staff";
 
 // ---------------- 시작 ----------------
 async function boot() {
-  // 초대 링크(#code=XXXX-XXXX)로 들어오면 바로 인증합니다.
-  const m = location.hash.match(/code=([A-Za-z0-9-]+)/);
-  if (m) {
-    history.replaceState(null, "", location.pathname + "#home");
-    try {
-      await api("/api/auth/redeem", { code: m[1] });
-    } catch (err) {
-      toast(err.message, true);
-    }
-  }
   await loadMe();
   window.addEventListener("hashchange", render);
   render();
@@ -108,7 +101,6 @@ async function loadMe() {
     state.me = await api("/api/me");
   } catch (err) {
     state.me = null;
-    state.setup = !!err.data?.setup;
   }
 }
 
@@ -123,7 +115,7 @@ function render() {
   tabs.hidden = false;
   const { member, settings } = state.me;
   $("#who").replaceChildren(
-    h("span", { class: "chip" }, member.class),
+    chip(member.class),
     h("span", { class: "who-name" }, member.name),
     ...(isStaff() ? [h("a", { class: "admin-link", href: "#admin" }, "관리")] : []),
   );
@@ -131,7 +123,8 @@ function render() {
   const [name, ...rest] = (location.hash.slice(1) || "home").split("/");
   for (const a of tabs.querySelectorAll("a")) a.classList.toggle("on", a.dataset.tab === name);
   const lunchTab = tabs.querySelector('[data-tab="lunch"]');
-  Object.assign(lunchTab, { href: settings.lunchUrl, target: "_blank", rel: "noopener" });
+  // 점심 탭은 런치패스에 자동 로그인해서 새 창으로 엽니다.
+  Object.assign(lunchTab, { href: "/api/lunchpass/go", target: "_blank", rel: "noopener" });
   const pages = { home: renderHome, notice: renderNotice, out: renderOut, lunch: renderLunch, qna: renderQna, admin: renderAdmin };
   (pages[name] || renderHome)(rest);
   window.scrollTo(0, 0);
@@ -146,75 +139,67 @@ function loading() {
 
 // ---------------- 인증 ----------------
 function renderLogin() {
-  const input = h("input", {
-    name: "code",
-    inputmode: "text",
-    autocomplete: "one-time-code",
-    autocapitalize: "characters",
-    placeholder: "예) AB12-CD34",
-    maxlength: "12",
-    required: true,
-    "aria-label": "개인 코드",
-  });
+  const loginId = h("input", { name: "loginId", autocomplete: "username", autocapitalize: "none", placeholder: "학번 / 로그인 ID", maxlength: "40", required: true, "aria-label": "학번 또는 로그인 ID" });
+  const password = h("input", { name: "password", type: "password", autocomplete: "current-password", placeholder: "비밀번호", maxlength: "128", required: true, "aria-label": "비밀번호" });
+  const done = async (r) => {
+    await loadMe();
+    toast(`${r.name}님, 환영합니다!`);
+    location.hash = "#home";
+    render();
+  };
   const form = h(
     "form",
     {
       class: "card",
       onsubmit: action(async () => {
-        const r = await api("/api/auth/redeem", { code: input.value });
-        await loadMe();
-        toast(`${r.name}님, 환영합니다!`);
-        location.hash = "#home";
-        render();
+        const r = await api("/api/auth/login", { loginId: loginId.value, password: password.value });
+        if (r.mustChange) return renderFirstPassword(loginId.value, password.value, r.name, done);
+        await done(r);
       }),
     },
-    h("h2", {}, "처음 한 번만 인증해 주세요"),
-    h("p", { class: "muted" }, "운영진에게 받은 8자리 개인 코드를 입력하면, 이 기기에서는 다시 입력하지 않아도 됩니다."),
-    input,
-    h("button", { class: "btn primary block" }, "인증하기"),
+    h("h2", {}, "런치패스 계정으로 로그인"),
+    h("p", { class: "muted" }, "런치패스와 같은 학번·비밀번호로 한 번만 로그인하면, 이 기기에서는 계속 로그인된 상태로 쓸 수 있어요. 점심 탭을 누르면 런치패스도 자동으로 로그인됩니다."),
+    loginId,
+    password,
+    h("button", { class: "btn primary block" }, "로그인"),
     h(
       "ul",
       { class: "hint" },
-      h("li", {}, "아이폰에서 '홈 화면에 추가'로 만든 아이콘은 사파리와 따로 저장되어, 아이콘으로 처음 열 때 한 번 더 입력해야 합니다."),
-      h("li", {}, "카카오톡 안에서 열린 화면보다 크롬·사파리에서 여는 것을 권장합니다."),
-      h("li", {}, "코드는 다른 사람에게 알려 주지 마세요. 잃어버리면 운영진에게 재발급을 요청하세요."),
+      h("li", {}, "계정은 운영진이 런치패스에 등록합니다. 처음이라면 운영진에게 받은 초기 비밀번호(숫자 4자리)로 로그인한 뒤 새 비밀번호를 정해 주세요."),
+      h("li", {}, "비밀번호를 잊었다면 운영진에게 초기화를 요청하세요."),
+      h("li", {}, "아이폰에서 '홈 화면에 추가'로 만든 아이콘은 사파리와 따로 저장되어, 아이콘으로 처음 열 때 한 번 더 로그인해야 합니다."),
     ),
   );
   view.replaceChildren(h("h1", {}, "대전 훈련생 포털"), form);
-  if (state.setup) view.append(renderSetup());
-  input.focus();
+  loginId.focus();
 }
 
-function renderSetup() {
-  const key = h("input", { type: "password", placeholder: "설정 키 (SETUP_KEY)", required: true, autocomplete: "off" });
-  const name = h("input", { placeholder: "운영진 이름", required: true, maxlength: "30" });
-  const out = h("div");
-  return h(
-    "details",
-    { class: "card" },
-    h("summary", {}, "최초 운영진 등록"),
+function renderFirstPassword(loginId, current, name, done) {
+  const pw = h("input", { type: "password", autocomplete: "new-password", placeholder: "새 비밀번호 (8자 이상)", minlength: "8", maxlength: "128", required: true });
+  const confirm2 = h("input", { type: "password", autocomplete: "new-password", placeholder: "새 비밀번호 확인", minlength: "8", maxlength: "128", required: true });
+  view.replaceChildren(
+    h("h1", {}, "새 비밀번호 정하기"),
     h(
       "form",
       {
+        class: "card",
         onsubmit: action(async () => {
-          const r = await api("/api/setup", { key: key.value, name: name.value });
-          out.replaceChildren(
-            h("p", { class: "ok" }, "등록했습니다. 다른 기기에서 쓸 개인 코드를 따로 적어 두세요:"),
-            h("p", { class: "code" }, r.code),
-            h("button", { class: "btn primary", type: "button", onclick: async () => (await loadMe(), render()) }, "시작하기"),
-          );
+          if (pw.value !== confirm2.value) throw new Error("새 비밀번호가 서로 다릅니다.");
+          const r = await api("/api/auth/first-password", { loginId, password: current, newPassword: pw.value });
+          await done(r);
         }),
       },
-      h("p", { class: "muted" }, "운영진이 아직 없을 때만 보입니다."),
-      key,
-      name,
-      h("button", { class: "btn" }, "운영진으로 등록"),
-      out,
+      h("p", {}, `${name}님, 처음 로그인했거나 비밀번호가 초기화되었어요.`),
+      h("p", { class: "muted small" }, "새 비밀번호는 런치패스에도 똑같이 적용됩니다."),
+      pw,
+      confirm2,
+      h("button", { class: "btn primary block" }, "비밀번호 바꾸고 시작하기"),
+      h("button", { type: "button", class: "btn block", onclick: () => renderLogin() }, "취소"),
     ),
   );
+  pw.focus();
 }
 
-// ---------------- 홈 ----------------
 async function renderHome() {
   const { member, settings, today } = state.me;
   const outCard = h("section", { class: "card" }, h("h2", {}, "🚶 외출"), loading());
@@ -222,15 +207,15 @@ async function renderHome() {
     "section",
     { class: "card" },
     h("h2", {}, "🍚 오늘 점심"),
-    h("p", { class: "muted" }, "점심 식당 선택은 런치패스에서 해요. (런치패스 학번·비밀번호로 로그인)"),
-    h("a", { class: "btn block", href: settings.lunchUrl, target: "_blank", rel: "noopener" }, "런치패스 열기 ↗"),
+    h("p", { class: "muted" }, "점심 식당 선택은 런치패스에서 해요. 따로 로그인할 필요 없이 바로 열려요."),
+    h("a", { class: "btn block", href: "/api/lunchpass/go", target: "_blank", rel: "noopener" }, "런치패스 열기 ↗"),
   );
   const noticeCard = h("section", { class: "card" }, h("h2", {}, "📅 내 출결 알림"), loading());
   const qnaCard = h("section", { class: "card" }, h("h2", {}, "💬 최근 문의"), loading());
 
   page(
     `${member.name}님, 안녕하세요`,
-    h("p", { class: "muted sub" }, `${fmtDay(today)} · ${member.class}`),
+    h("p", { class: "muted sub" }, `${fmtDay(today)} · ${className(member.class)}`),
     settings.lmsUrl
       ? h("a", { class: "btn lms block", href: settings.lmsUrl, target: "_blank", rel: "noopener" }, "🎓 LMS 바로가기")
       : isStaff()
@@ -358,7 +343,7 @@ function noticeItem(n, today, extra) {
     h(
       "div",
       { class: "grow" },
-      h("div", {}, n.name ? h("strong", {}, `${n.name} `) : null, n.name ? h("span", { class: "chip" }, n.class) : null, " ", fmtDay(n.day), rel ? ` (${rel})` : "", n.time ? ` · ${n.time}` : ""),
+      h("div", {}, n.name ? h("strong", {}, `${n.name} `) : null, n.name ? chip(n.class) : null, " ", fmtDay(n.day), rel ? ` (${rel})` : "", n.time ? ` · ${n.time}` : ""),
       h("div", { class: "muted small" }, n.reason),
     ),
     n.checked ? h("span", { class: "ok small" }, "확인됨") : null,
@@ -519,17 +504,16 @@ async function renderOut() {
 }
 
 // ---------------- 점심 ----------------
-// 점심은 런치패스(별도 앱)에서 합니다. 하단 탭은 런치패스를 바로 열고, 이 화면은 #lunch 로 들어온 경우용입니다.
+// 점심은 런치패스에서 합니다. 하단 탭은 런치패스를 자동 로그인해서 열고, 이 화면은 #lunch 로 들어온 경우용입니다.
 function renderLunch() {
-  const url = state.me.settings.lunchUrl;
   page(
     "오늘 점심",
     h(
       "section",
       { class: "card" },
       h("p", {}, "점심 식당 선택·인원 확인은 ", h("strong", {}, "런치패스"), "에서 해요."),
-      h("p", { class: "muted small" }, "런치패스는 이 포털과 따로 로그인합니다(학번·비밀번호). 오전 9시부터 12시 전까지 선택·변경할 수 있어요."),
-      h("a", { class: "btn primary block", href: url, target: "_blank", rel: "noopener" }, "런치패스 열기 ↗"),
+      h("p", { class: "muted small" }, "포털에 로그인되어 있으면 런치패스도 자동으로 로그인됩니다. 오전 9시부터 12시 전까지 선택·변경할 수 있어요."),
+      h("a", { class: "btn primary block", href: "/api/lunchpass/go", target: "_blank", rel: "noopener" }, "런치패스 열기 ↗"),
     ),
   );
 }
@@ -601,7 +585,7 @@ async function renderPost(id) {
       "article",
       { class: "card" },
       h("h2", {}, p.private ? "🔒 " : "", p.title),
-      h("p", { class: "muted small" }, `${p.author} (${p.class}) · ${fmtDateTime(p.createdAt)}`),
+      h("p", { class: "muted small" }, `${p.author} (${className(p.class)}) · ${fmtDateTime(p.createdAt)}`),
       h("p", { class: "body" }, p.body),
       p.canDelete
         ? h(
@@ -651,7 +635,7 @@ async function renderAdmin([tab = "day"]) {
   if (!isStaff()) return renderHome();
   const tabs = [
     ["day", "현황"],
-    ["members", "명단·코드"],
+    ["members", "명단"],
     ["settings", "설정"],
   ];
   const nav = h("div", { class: "seg" }, tabs.map(([k, l]) => h("a", { href: `#admin/${k}`, class: k === tab ? "on" : null }, l)));
@@ -716,7 +700,7 @@ async function adminDay(body, date) {
               h(
                 "li",
                 { class: "row" },
-                h("span", { class: "chip" }, o.class),
+                chip(o.class),
                 h("strong", {}, o.name),
                 h("span", { class: "grow" }, `${fmtTime(o.startAt)} → `, o.endAt ? fmtTime(o.endAt) : h("span", { class: "warn" }, r.day === r.today ? "외출 중" : "복귀 기록 없음")),
                 o.reason ? h("span", { class: "muted small" }, o.reason) : null,
@@ -734,88 +718,13 @@ async function adminDay(body, date) {
   );
 }
 
-function inviteLink(code) {
-  return `${location.origin}/#code=${code}`;
-}
-function copy(textValue) {
-  return action(async () => {
-    await navigator.clipboard.writeText(textValue);
-    toast("복사했습니다.");
-  });
-}
-function csvDownload(rows, filename) {
-  const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
-  const csv = "﻿" + rows.map((r) => r.map(esc).join(",")).join("\r\n");
-  const a = h("a", { href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })), download: filename });
-  document.body.append(a);
-  a.click();
-  a.remove();
-}
-function codesResult(created) {
-  const rows = created.map((c) => [c.name, c.class, c.code, inviteLink(c.code)]);
-  const all = created.map((c) => `${c.name}(${c.class}) ${c.code}\n${inviteLink(c.code)}`).join("\n\n");
-  return h(
-    "div",
-    { class: "card soft" },
-    h("h2", {}, "개인 코드"),
-    h("p", { class: "warn small" }, "보안을 위해 코드는 지금만 보입니다. 꼭 복사하거나 CSV로 받아 두세요. 잃어버리면 재발급하면 됩니다."),
-    h(
-      "div",
-      { class: "row-btns" },
-      h("button", { class: "btn small", onclick: copy(all) }, "전체 복사"),
-      h("button", { class: "btn small", onclick: () => csvDownload([["이름", "반", "코드", "초대 링크"], ...rows], "portal-codes.csv") }, "CSV 받기"),
-    ),
-    h(
-      "ul",
-      { class: "list" },
-      created.map((c) =>
-        h(
-          "li",
-          { class: "row" },
-          h("span", { class: "chip" }, c.class),
-          h("strong", {}, c.name),
-          h("code", { class: "grow" }, c.code),
-          h("button", { class: "btn small", onclick: copy(`${c.name}님 훈련생 포털 개인 코드: ${c.code}\n${inviteLink(c.code)}`) }, "링크 복사"),
-        ),
-      ),
-    ),
-  );
-}
-
 async function adminMembers(body) {
   const r = await api("/api/admin/members");
-  const result = h("div");
-  const lines = h("textarea", { rows: "5", placeholder: "한 줄에 한 명: 이름,반\n예)\n홍길동,DM\n김철수,AX" });
-  const role = h("select", {}, h("option", { value: "trainee" }, "훈련생"), h("option", { value: "staff" }, "운영진"));
-  const filter = h("select", { onchange: () => drawList() }, h("option", { value: "" }, "전체"), [...state.me.classes, "운영진"].map((c) => h("option", { value: c }, c)));
+  const classes = [...new Set(r.members.map((m) => m.class))].sort();
+  const filter = h("select", { onchange: () => drawList() }, h("option", { value: "" }, "전체"), classes.map((c) => h("option", { value: c }, className(c))));
   const listBox = h("ul", { class: "list" });
-  const form = h(
-    "form",
-    {
-      class: "card",
-      onsubmit: action(async () => {
-        const entries = lines.value
-          .split("\n")
-          .map((l) => l.trim())
-          .filter(Boolean)
-          .map((l) => {
-            if (role.value === "staff") return { name: l };
-            const [name, cls] = l.split(/[,\t]|\s+(?=\S+$)/).map((s) => s.trim());
-            return { name, class: cls };
-          });
-        const res = await api("/api/admin/members", { role: role.value, entries });
-        lines.value = "";
-        toast(`${res.created.length}명을 등록했습니다.`);
-        await adminMembers(body);
-        body.prepend(codesResult(res.created));
-      }),
-    },
-    h("h2", {}, "명단 등록"),
-    h("p", { class: "muted small" }, "훈련생은 '이름,반'(반은 DM 또는 AX), 운영진은 이름만 적으면 됩니다. 등록하면 개인 코드와 초대 링크가 나옵니다."),
-    lines,
-    h("div", { class: "row" }, h("label", { class: "field grow" }, h("span", {}, "구분"), role), h("button", { class: "btn primary" }, "등록")),
-  );
-
+  const status = (m) =>
+    !m.active ? "포털 중지됨" : m.firstLoginPending ? "첫 로그인 대기" : m.joined ? (m.devices ? `포털 사용 중 · ${fmtDateTime(m.lastSeen)}` : "로그아웃 상태") : "포털 로그인 전";
   function drawList() {
     const list = r.members.filter((m) => !filter.value || m.class === filter.value);
     listBox.replaceChildren(
@@ -826,70 +735,48 @@ async function adminMembers(body) {
           h(
             "div",
             { class: "row" },
-            h("span", { class: "chip" }, m.class),
-            h("strong", { class: "grow" }, m.name, m.role === "staff" && m.class !== "운영진" ? " (운영진)" : "", m.active ? "" : " · 중지됨"),
-            h("span", { class: "muted small" }, m.devices ? `기기 ${m.devices} · ${fmtDateTime(m.lastSeen)}` : "미인증"),
+            chip(m.class),
+            h("strong", { class: "grow" }, m.name, m.role === "staff" ? " (운영진)" : "", " ", h("span", { class: "muted small" }, m.loginId)),
+            h("span", { class: "muted small" }, status(m)),
           ),
-          h(
-            "div",
-            { class: "row-btns" },
-            h(
-              "button",
-              {
-                class: "btn small",
-                onclick: action(async () => {
-                  if (!confirm(`${m.name}님의 코드를 새로 만들까요? 기존 코드와 기기 로그인은 모두 끝납니다.`)) return;
-                  const res = await api(`/api/admin/members/${m.id}/reissue`, {});
-                  result.replaceChildren(codesResult([res]));
-                  result.scrollIntoView({ behavior: "smooth" });
-                }),
-              },
-              "코드 재발급",
-            ),
-            m.id !== state.me.member.id
-              ? h(
+          m.id && m.id !== state.me.member.id
+            ? h(
+                "div",
+                { class: "row-btns" },
+                h(
                   "button",
                   {
                     class: "btn small",
                     onclick: action(async () => {
-                      if (m.active && !confirm(`${m.name}님 사용을 중지할까요? 기록은 남습니다.`)) return;
+                      if (m.active && !confirm(`${m.name}님의 포털 사용을 중지할까요? 런치패스 계정은 그대로이고, 포털 기록은 남습니다.`)) return;
                       await api(`/api/admin/members/${m.id}/update`, { active: !m.active });
                       adminMembers(body);
                     }),
                   },
-                  m.active ? "중지" : "다시 사용",
-                )
-              : null,
-            m.id !== state.me.member.id && m.role === "trainee"
-              ? h(
-                  "button",
-                  {
-                    class: "btn small",
-                    onclick: action(async () => {
-                      const cls = prompt("반을 입력하세요 (DM 또는 AX)", m.class);
-                      if (!cls) return;
-                      await api(`/api/admin/members/${m.id}/update`, { class: cls });
-                      adminMembers(body);
-                    }),
-                  },
-                  "반 변경",
-                )
-              : null,
-          ),
+                  m.active ? "포털 사용 중지" : "다시 사용",
+                ),
+              )
+            : null,
         ),
       ),
     );
     if (!list.length) listBox.append(h("li", { class: "muted" }, "등록된 사람이 없습니다."));
   }
   drawList();
-  const counts = r.members.filter((m) => m.active).reduce((acc, m) => ((acc[m.class] = (acc[m.class] || 0) + 1), acc), {});
+  const joined = r.members.filter((m) => m.joined).length;
   body.replaceChildren(
-    result,
-    form,
+    h(
+      "section",
+      { class: "card soft" },
+      h("h2", {}, "명단은 런치패스에서 한 번만 등록"),
+      h("p", { class: "muted small" }, "훈련생 등록·반 지정·비밀번호 초기화·운영진 지정은 런치패스 관리 화면에서 합니다. 등록하면 같은 학번·비밀번호로 포털에도 바로 로그인할 수 있어요. 런치패스 운영진은 포털에서도 운영진입니다."),
+      h("a", { class: "btn small", href: "/api/lunchpass/go", target: "_blank", rel: "noopener" }, "런치패스 열기 ↗"),
+    ),
+    ...(r.lunchpassOk ? [] : [h("p", { class: "card warn" }, "런치패스에 연결하지 못해 포털에 로그인한 적 있는 사람만 보여 줍니다.")]),
     h(
       "section",
       { class: "card" },
-      h("h2", {}, "등록된 사람 ", h("span", { class: "muted small" }, Object.entries(counts).map(([c, n]) => `${c} ${n}`).join(" · "))),
+      h("h2", {}, "명단 ", h("span", { class: "muted small" }, `${r.members.length}명 · 포털 로그인 ${joined}명`)),
       h("label", { class: "field" }, h("span", {}, "반"), filter),
       listBox,
     ),
@@ -899,7 +786,6 @@ async function adminMembers(body) {
 async function adminSettings(body) {
   const s = state.me.settings;
   const lms = h("input", { type: "url", value: s.lmsUrl, placeholder: "https://…" });
-  const lunch = h("input", { type: "url", value: s.lunchUrl, placeholder: "https://matzip-lamda7.vercel.app/" });
   const notice = h("textarea", { rows: "2", maxlength: "300", placeholder: "모든 화면 위에 보이는 공지 (비우면 숨김)" });
   notice.value = s.notice;
   const links = h("textarea", { rows: "4", placeholder: "한 줄에 하나: 이름 | 주소\n예) 시간표 | https://…" });
@@ -918,14 +804,13 @@ async function adminSettings(body) {
               const i = l.lastIndexOf("|");
               return i < 0 ? { label: "", url: l } : { label: l.slice(0, i).trim(), url: l.slice(i + 1).trim() };
             });
-          const r = await api("/api/admin/settings", { lmsUrl: lms.value, lunchUrl: lunch.value, notice: notice.value, links: parsed });
+          const r = await api("/api/admin/settings", { lmsUrl: lms.value, notice: notice.value, links: parsed });
           state.me.settings = r.settings;
           toast("저장했습니다.");
           render();
         }),
       },
       h("label", { class: "field" }, h("span", {}, "LMS 주소"), lms),
-      h("label", { class: "field" }, h("span", {}, "런치패스 주소 (점심 탭이 여는 곳)"), lunch),
       h("label", { class: "field" }, h("span", {}, "공지"), notice),
       h("label", { class: "field" }, h("span", {}, "그 밖의 바로가기 (최대 8개)"), links),
       h("button", { class: "btn primary block" }, "저장"),

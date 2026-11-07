@@ -8,7 +8,6 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env --no-warnings=ExperimentalWarning server.js",
-    "add-staff": "node --env-file-if-exists=.env --no-warnings=ExperimentalWarning scripts/add-staff.js",
     "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js"
   },
   "dependencies": {
