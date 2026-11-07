@@ -25,7 +25,7 @@
 - 이름·반·운영진 여부는 한 시간마다 런치패스에서 다시 확인합니다. 런치패스에 잠시 연결되지 않아도, 이미 로그인한 기기는 계속 쓸 수 있습니다.
 - 비밀번호를 잊으면 런치패스 운영진이 **비밀번호 초기화**를 합니다. 포털의 **관리 → 명단 → 포털 사용 중지**는 포털만 막고 런치패스 계정은 그대로 둡니다.
 
-두 앱은 DB를 공유하지 않고, 같은 비밀값 `PORTAL_SECRET`으로 서명한 요청과 토큰만 주고받습니다. 서명 코드는 `lib/lunchpass.js`와 런치패스의 `lib/portal.js`에 같은 내용으로 있습니다.
+두 앱은 **같은 Neon 데이터베이스**를 쓰지만 테이블은 나뉘어 있습니다. 런치패스는 `public` 스키마, 포털은 `portal` 스키마를 씁니다. 두 앱 모두 `sessions`·`posts` 테이블이 있어서 스키마를 나눴고, 포털은 SQL을 보낼 때 테이블 이름 앞에 스키마를 붙입니다(Neon pooled 연결에서도 안전). 스키마 이름은 `PORTAL_DB_SCHEMA`로 바꿀 수 있습니다(기본 `portal`, `public`은 허용하지 않음). 계정 확인은 런치패스 코드를 그대로 쓰도록 DB를 직접 읽지 않고, 같은 비밀값 `PORTAL_SECRET`으로 서명한 요청과 토큰만 주고받습니다. 서명 코드는 `lib/lunchpass.js`와 런치패스의 `lib/portal.js`에 같은 내용으로 있습니다.
 
 알아 둘 점:
 - 아이폰에서 '홈 화면에 추가'한 아이콘은 사파리와 저장 공간이 따로라서, 아이콘으로 처음 열 때 한 번 더 로그인해야 합니다.
@@ -37,7 +37,7 @@
 `lunch`(런치패스)와 같은 구성입니다. Vercel 기본 주소(`프로젝트명.vercel.app`)를 쓰면 도메인을 사지 않아도 됩니다.
 
 1. Vercel → **New Project → Import**로 `LamdaLee/student` 저장소를 가져옵니다. Framework Preset은 **Other**, 나머지는 기본값(`vercel.json` 사용)입니다.
-2. **Storage → Neon(PostgreSQL)** 을 만들어 이 프로젝트에 연결합니다(싱가포르 지역 권장, 함수도 `sin1`). 런치패스와는 **다른** 데이터베이스입니다.
+2. 런치패스가 쓰는 **같은 Neon 데이터베이스**를 이 프로젝트에도 연결합니다. Vercel **Storage**에서 기존 `lunchpass-db`를 이 프로젝트에 연결하거나, 런치패스와 같은 연결 문자열을 `DATABASE_URL`로 넣습니다. 포털 테이블은 같은 DB 안의 **`portal` 스키마**에 따로 만들어지고 런치패스 테이블(`public`)은 건드리지 않습니다.
 3. 비밀번호 관리자 등으로 32자 이상 무작위 값을 하나 만들어, **두 프로젝트에 같은 값으로** 넣습니다. Git이나 채팅에 붙여 넣지 마세요.
    - 포털 프로젝트: `PORTAL_SECRET` = 그 값. 런치패스 주소가 기본(https://matzip-lamda7.vercel.app)과 다르면 `LUNCHPASS_URL`도 넣습니다.
    - 런치패스 프로젝트: `PORTAL_SECRET` = 같은 값, `PORTAL_URL` = 포털 주소(예: `https://프로젝트명.vercel.app`).
@@ -80,6 +80,6 @@ TEST_DATABASE_URL=postgres://... npm test
 - `public/`: 화면(`index.html`, `app.js`, `style.css`), 홈 화면 아이콘·매니페스트
 - `lib/app.js`: API 전체(로그인, 출결 알림, 외출, 문의, 관리)
 - `lib/lunchpass.js`: 런치패스 연동(서명, 로그인·명단 조회, 자동 로그인 토큰)
-- `lib/db.js`: PostgreSQL / SQLite 연결과 테이블(첫 요청 때 자동 생성)
+- `lib/db.js`: PostgreSQL / SQLite 연결과 테이블(첫 요청 때 `portal` 스키마와 테이블 자동 생성)
 - `server.js`: 로컬 서버. `api/index.js` + `vercel.json`: Vercel 배포
 - `test/`: API 테스트

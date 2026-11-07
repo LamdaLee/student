@@ -417,3 +417,64 @@ test("Vercel 경로(route 쿼리)로도 동작한다", async () => {
   assert.equal(status, 401);
   await db.close();
 });
+
+test("PostgreSQL 에서는 테이블 이름 앞에 포털 스키마를 붙인다", async () => {
+  const { qualify, schemaName } = await import("../lib/db.js");
+  assert.equal(
+    qualify("SELECT s.last_seen FROM sessions s JOIN members m ON m.id = s.member_id", "portal"),
+    'SELECT s.last_seen FROM "portal".sessions s JOIN "portal".members m ON m.id = s.member_id',
+  );
+  assert.equal(
+    qualify("CREATE INDEX IF NOT EXISTS sessions_member ON sessions (member_id)", "portal"),
+    'CREATE INDEX IF NOT EXISTS sessions_member ON "portal".sessions (member_id)',
+  );
+  assert.equal(
+    qualify("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", "p"),
+    'INSERT INTO "p".settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+  );
+  assert.equal(schemaName(undefined), process.env.PORTAL_DB_SCHEMA || "portal");
+  assert.throws(() => schemaName("public"), /겹칩니다/);
+  assert.throws(() => schemaName("a;drop"), /PORTAL_DB_SCHEMA/);
+});
+
+test("런치패스와 같은 DB 를 써도 포털 테이블은 따로 둔다", { skip: !process.env.TEST_DATABASE_URL && "TEST_DATABASE_URL 없음" }, async () => {
+  const { default: pg } = await import("pg");
+  const admin = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL });
+  await admin.connect();
+  const suffix = randomBytes(5).toString("hex");
+  const lpSchema = `lp_${suffix}`; // 런치패스 테이블이 있는 곳(운영에서는 public)
+  const portalSchema = `portal_${suffix}`;
+  await admin.query(`CREATE SCHEMA ${lpSchema}`);
+  await admin.query(`CREATE TABLE ${lpSchema}.sessions (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires BIGINT NOT NULL)`);
+  await admin.query(`CREATE TABLE ${lpSchema}.posts (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT)`);
+  await admin.query(`INSERT INTO ${lpSchema}.sessions VALUES ('lp-session', 1, 1)`);
+  // 기본 경로가 런치패스 쪽을 가리켜도(접속 옵션) 포털은 자기 스키마만 쓴다.
+  const url = new URL(process.env.TEST_DATABASE_URL);
+  url.searchParams.set("options", `-c search_path=${lpSchema}`);
+  const db = await openDb({ url: url.toString(), schema: portalSchema });
+  try {
+    const lp = fakeLunchpass();
+    lp.add("홍길동", "dm001", "DM");
+    const app = createApp(db, { now: () => T0, lunchpass: lp, secureCookie: false });
+    const call = async (method, path, body, cookie) => {
+      const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+      Object.assign(req, { method, url: path, headers: { host: "x", ...(body ? { "content-type": "application/json" } : {}), ...(cookie ? { cookie } : {}) }, socket: {} });
+      const res = {};
+      await app(req, { writeHead: (s, h) => Object.assign(res, { s, h }), end: (d) => (res.d = d) });
+      return { status: res.s, cookie: res.h?.["Set-Cookie"]?.split(";")[0] };
+    };
+    const login = await call("POST", "/api/auth/login", { loginId: "dm001", password: PW });
+    assert.equal(login.status, 200);
+    assert.equal((await call("POST", "/api/posts", { title: "질문", body: "내용" }, login.cookie)).status, 200);
+    const count = async (schema, table) => Number((await admin.query(`SELECT COUNT(*) n FROM ${schema}.${table}`)).rows[0].n);
+    assert.equal(await count(portalSchema, "sessions"), 1);
+    assert.equal(await count(portalSchema, "posts"), 1);
+    assert.equal(await count(lpSchema, "sessions"), 1); // 런치패스 쪽은 그대로
+    assert.equal(await count(lpSchema, "posts"), 0);
+  } finally {
+    await db.close();
+    await admin.query(`DROP SCHEMA ${lpSchema} CASCADE`);
+    await admin.query(`DROP SCHEMA ${portalSchema} CASCADE`);
+    await admin.end();
+  }
+});
