@@ -93,6 +93,10 @@ const isStaff = () => state.me?.member.role === "staff";
 async function boot() {
   await loadMe();
   window.addEventListener("hashchange", render);
+  // 알림을 눌렀을 때 서비스 워커가 보내는 이동 요청
+  navigator.serviceWorker?.addEventListener("message", (e) => {
+    if (e.data?.type === "open" && typeof e.data.url === "string" && e.data.url.startsWith(location.origin)) location.href = e.data.url;
+  });
   render();
 }
 
@@ -631,7 +635,7 @@ async function renderPost(id) {
 }
 
 // ---------------- 운영진 ----------------
-async function renderAdmin([tab = "day"]) {
+async function renderAdmin([tab = "day", arg]) {
   if (!isStaff()) return renderHome();
   const tabs = [
     ["day", "현황"],
@@ -640,10 +644,15 @@ async function renderAdmin([tab = "day"]) {
   ];
   const nav = h("div", { class: "seg" }, tabs.map(([k, l]) => h("a", { href: `#admin/${k}`, class: k === tab ? "on" : null }, l)));
   const body = h("div", {}, loading());
-  page("운영 관리", nav, body);
+  // 이 기기에서 알림을 아직 안 켰으면 설정으로 안내합니다.
+  const pushHint =
+    tab !== "settings" && !("Notification" in window && Notification.permission === "granted")
+      ? h("a", { class: "hint-box block-link", href: "#admin/settings" }, "🔔 휴대폰 알림이 꺼져 있어요. 설정에서 '이 기기에서 알림 받기'를 눌러 주세요.")
+      : null;
+  page("운영 관리", nav, pushHint, body);
   const fn = { day: adminDay, members: adminMembers, settings: adminSettings }[tab] || adminDay;
   try {
-    await fn(body);
+    await fn(body, arg);
   } catch (err) {
     body.replaceChildren(h("p", { class: "bad" }, err.message));
   }
@@ -783,6 +792,122 @@ async function adminMembers(body) {
   );
 }
 
+// ---------------- 운영진 휴대폰 알림 ----------------
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+function deviceName() {
+  const ua = navigator.userAgent;
+  const os = /iPhone/.test(ua) ? "아이폰" : /iPad/.test(ua) || isIOS() ? "아이패드" : /Android/.test(ua) ? "안드로이드" : /Mac/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows" : "기기";
+  const browser = /SamsungBrowser/.test(ua) ? "삼성 인터넷" : /Edg\//.test(ua) ? "Edge" : /Chrome|CriOS/.test(ua) ? "크롬" : /Firefox|FxiOS/.test(ua) ? "파이어폭스" : /Safari/.test(ua) ? "사파리" : "";
+  return `${os}${browser ? ` · ${browser}` : ""}`;
+}
+function keyBytes(base64url) {
+  const pad = "=".repeat((4 - (base64url.length % 4)) % 4);
+  const raw = atob((base64url + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+async function currentSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.getRegistration("/");
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+
+function pushCard() {
+  const fill = (...children) => card.replaceChildren(...children.filter((c) => c != null && c !== false));
+  const card = h("section", { class: "card" }, h("h2", {}, "🔔 운영진 휴대폰 알림"), loading());
+  const draw = async () => {
+    const info = await api("/api/push");
+    const head = [
+      h("h2", {}, "🔔 운영진 휴대폰 알림"),
+      h("p", { class: "muted small" }, "훈련생이 결석·지각·조퇴를 알리거나 취소할 때, 새 문의 글이나 댓글을 쓸 때 이 기기로 바로 알림이 와요. 알림을 누르면 해당 화면이 열립니다."),
+    ];
+    if (!info.enabled)
+      return fill(...head, h("p", { class: "warn small" }, "서버에 알림 키(VAPID)가 아직 설정되지 않았습니다. README 의 '운영진 휴대폰 알림' 설정을 확인해 주세요."));
+    if (!pushSupported()) {
+      return fill(
+        ...head,
+        h(
+          "p",
+          { class: "warn small" },
+          isIOS() && !isStandalone()
+            ? "아이폰은 사파리에서 공유 버튼 → '홈 화면에 추가'를 한 뒤, 홈 화면의 포털 아이콘으로 열어서 여기서 알림을 켜 주세요. (iOS 16.4 이상)"
+            : "이 브라우저는 알림을 지원하지 않습니다. 휴대폰의 크롬·삼성 인터넷이나, 아이폰은 홈 화면에 추가한 포털 아이콘에서 열어 주세요.",
+        ),
+      );
+    }
+    const sub = await currentSubscription();
+    const devices = info.devices.length
+      ? h("p", { class: "muted small" }, `알림 받는 내 기기: ${info.devices.map((d) => d.device).join(", ")}`)
+      : null;
+    if (Notification.permission === "denied")
+      return fill(...head, h("p", { class: "warn small" }, "이 기기에서 포털 알림이 차단되어 있습니다. 브라우저(또는 휴대폰) 설정 → 사이트 알림에서 허용으로 바꾼 뒤 다시 열어 주세요."), devices);
+    if (sub && Notification.permission === "granted") {
+      return fill(
+        ...head,
+        h("p", { class: "ok" }, "✅ 이 기기는 알림을 받고 있어요."),
+        devices,
+        h(
+          "div",
+          { class: "row-btns" },
+          h(
+            "button",
+            {
+              class: "btn small",
+              onclick: action(async () => {
+                // 서버에 다시 알려 두고(다른 운영진 계정으로 바뀌었을 수도 있음) 테스트를 보냅니다.
+                await api("/api/push/subscribe", { subscription: sub.toJSON(), device: deviceName() });
+                const r = await api("/api/push/test", {});
+                toast(r.sent ? "테스트 알림을 보냈어요. 잠시 뒤 휴대폰을 확인해 주세요." : "보내지 못했어요. 알림을 껐다가 다시 켜 주세요.", !r.sent);
+              }),
+            },
+            "테스트 알림 보내기",
+          ),
+          h(
+            "button",
+            {
+              class: "btn small",
+              onclick: action(async () => {
+                await api("/api/push/unsubscribe", { endpoint: sub.endpoint });
+                await sub.unsubscribe();
+                toast("이 기기의 알림을 껐어요.");
+                draw();
+              }),
+            },
+            "이 기기 알림 끄기",
+          ),
+        ),
+      );
+    }
+    fill(
+      ...head,
+      devices,
+      h(
+        "button",
+        {
+          class: "btn primary block",
+          onclick: action(async () => {
+            // 권한 요청은 버튼을 누른 그 순간에 해야 합니다(아이폰).
+            const permission = await Notification.requestPermission();
+            if (permission !== "granted") throw new Error("알림을 허용해야 받을 수 있어요.");
+            const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+            await navigator.serviceWorker.ready;
+            const subscription =
+              (await reg.pushManager.getSubscription()) ||
+              (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(info.publicKey) }));
+            await api("/api/push/subscribe", { subscription: subscription.toJSON(), device: deviceName() });
+            toast("이 기기에서 알림을 받아요.");
+            draw();
+          }),
+        },
+        "이 기기에서 알림 받기",
+      ),
+    );
+  };
+  draw().catch((err) => fill(h("h2", {}, "🔔 운영진 휴대폰 알림"), h("p", { class: "bad" }, err.message)));
+  return card;
+}
+
 async function adminSettings(body) {
   const s = state.me.settings;
   const lms = h("input", { type: "url", value: s.lmsUrl, placeholder: "https://…" });
@@ -791,6 +916,7 @@ async function adminSettings(body) {
   const links = h("textarea", { rows: "4", placeholder: "한 줄에 하나: 이름 | 주소\n예) 시간표 | https://…" });
   links.value = s.links.map((l) => `${l.label} | ${l.url}`).join("\n");
   body.replaceChildren(
+    pushCard(),
     h(
       "form",
       {

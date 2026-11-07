@@ -478,3 +478,110 @@ test("런치패스와 같은 DB 를 써도 포털 테이블은 따로 둔다", {
     await admin.end();
   }
 });
+
+test("운영진 휴대폰 알림: 출결 알림·취소, 새 문의·댓글", async () => {
+  const db = await openDb({ url: "", file: ":memory:" });
+  const lp = fakeLunchpass();
+  lp.add("김운영", "admin", "OTHER", { role: "admin" });
+  lp.add("박운영", "admin2", "OTHER", { role: "admin" });
+  lp.add("홍길동", "dm001", "DM");
+  const sent = [];
+  const push = {
+    publicKey: "test-public-key",
+    async send(sub, payload) {
+      if (sub.endpoint.endsWith("/gone")) return { gone: true };
+      sent.push({ endpoint: sub.endpoint, ...payload });
+      return { ok: true };
+    },
+  };
+  const app = createApp(db, { now: () => T0, lunchpass: lp, push, secureCookie: false });
+  const call = async (method, path, body, cookie) => {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+    Object.assign(req, { method, url: path, headers: { host: "x", ...(body ? { "content-type": "application/json" } : {}), ...(cookie ? { cookie } : {}) }, socket: {} });
+    const res = {};
+    await app(req, { writeHead: (s, h) => Object.assign(res, { s, h }), end: (d) => (res.d = d) });
+    return { status: res.s, json: res.d ? JSON.parse(res.d) : null, cookie: res.h?.["Set-Cookie"]?.split(";")[0] };
+  };
+  const login = async (id) => (await call("POST", "/api/auth/login", { loginId: id, password: PW })).cookie;
+  const staff = await login("admin");
+  const staff2 = await login("admin2");
+  const dm = await login("dm001");
+  const sub = (endpoint) => ({ subscription: { endpoint, keys: { p256dh: "k", auth: "a" } }, device: "아이폰 · 사파리" });
+
+  // 훈련생은 알림을 등록할 수 없다
+  assert.equal((await call("POST", "/api/push/subscribe", sub("https://push.example.com/x"), dm)).status, 403);
+  assert.equal((await call("POST", "/api/push/subscribe", sub("http://insecure.example.com/x"), staff)).status, 400);
+  assert.equal((await call("POST", "/api/push/subscribe", sub("https://push.example.com/a1"), staff)).status, 200);
+  assert.equal((await call("POST", "/api/push/subscribe", sub("https://push.example.com/a2"), staff2)).status, 200);
+  assert.equal((await call("POST", "/api/push/subscribe", sub("https://push.example.com/gone"), staff2)).status, 200);
+  const info = await call("GET", "/api/push", undefined, staff);
+  assert.equal(info.json.enabled, true);
+  assert.equal(info.json.publicKey, "test-public-key");
+  assert.deepEqual(info.json.devices.map((d) => d.device), ["아이폰 · 사파리"]);
+
+  // 지각 알림 → 운영진 두 명의 기기로
+  const n = await call("POST", "/api/notices", { kind: "late", day: "2026-11-10", time: "09:40", reason: "병원" }, dm);
+  assert.equal(n.status, 200);
+  assert.deepEqual(sent.map((s) => s.endpoint).sort(), ["https://push.example.com/a1", "https://push.example.com/a2"]);
+  assert.equal(sent[0].title, "[지각] 홍길동(DM)");
+  assert.equal(sent[0].body, "11/10(화) 09:40 · 병원");
+  assert.equal(sent[0].url, "/#admin/day/2026-11-10");
+  // 만료된 기기는 지운다
+  assert.equal((await db.get("SELECT COUNT(*) AS n FROM push_subscriptions WHERE endpoint LIKE '%/gone'")).n, 0);
+
+  sent.length = 0;
+  await call("POST", `/api/notices/${n.json.id}/cancel`, {}, dm);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].title, "[지각 취소] 홍길동(DM)");
+
+  sent.length = 0;
+  const post = await call("POST", "/api/posts", { title: "노트북 대여", body: "가능한가요?", private: true }, dm);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].title, "[새 문의 · 비공개] 홍길동(DM)");
+  assert.equal(sent[0].url, `/#qna/${post.json.id}`);
+
+  // 운영진 답변은 운영진에게 알리지 않고, 훈련생 추가 댓글은 알린다
+  sent.length = 0;
+  await call("POST", `/api/posts/${post.json.id}/replies`, { body: "네 가능합니다" }, staff);
+  assert.equal(sent.length, 0);
+  await call("POST", `/api/posts/${post.json.id}/replies`, { body: "감사합니다" }, dm);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].title, "[문의 댓글] 홍길동(DM)");
+
+  // 운영진이 쓴 글은 본인에게 오지 않고 다른 운영진에게만
+  sent.length = 0;
+  await call("POST", "/api/notices", { kind: "absent", day: "2026-11-11", reason: "출장" }, staff);
+  assert.deepEqual(sent.map((s) => s.endpoint), ["https://push.example.com/a2"]);
+
+  // 테스트 알림은 내 기기로만
+  sent.length = 0;
+  const test1 = await call("POST", "/api/push/test", {}, staff);
+  assert.equal(test1.json.sent, 1);
+  assert.deepEqual(sent.map((s) => s.endpoint), ["https://push.example.com/a1"]);
+
+  // 끄면 더 이상 안 온다
+  await call("POST", "/api/push/unsubscribe", { endpoint: "https://push.example.com/a1" }, staff);
+  sent.length = 0;
+  await call("POST", "/api/notices", { kind: "early", day: "2026-11-12", time: "15:00", reason: "면접" }, dm);
+  assert.deepEqual(sent.map((s) => s.endpoint), ["https://push.example.com/a2"]);
+  await db.close();
+});
+
+test("알림 키가 없으면 알림만 꺼지고 나머지는 동작한다", async () => {
+  const db = await openDb({ url: "", file: ":memory:" });
+  const lp = fakeLunchpass();
+  lp.add("김운영", "admin", "OTHER", { role: "admin" });
+  const app = createApp(db, { now: () => T0, lunchpass: lp, push: null, secureCookie: false });
+  const call = async (method, path, body, cookie) => {
+    const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+    Object.assign(req, { method, url: path, headers: { host: "x", ...(body ? { "content-type": "application/json" } : {}), ...(cookie ? { cookie } : {}) }, socket: {} });
+    const res = {};
+    await app(req, { writeHead: (s, h) => Object.assign(res, { s, h }), end: (d) => (res.d = d) });
+    return { status: res.s, json: res.d ? JSON.parse(res.d) : null, cookie: res.h?.["Set-Cookie"]?.split(";")[0] };
+  };
+  const staff = (await call("POST", "/api/auth/login", { loginId: "admin", password: PW })).cookie;
+  assert.equal((await call("GET", "/api/push", undefined, staff)).json.enabled, false);
+  assert.equal((await call("POST", "/api/push/subscribe", { subscription: { endpoint: "https://p.example.com/1", keys: { p256dh: "k", auth: "a" } } }, staff)).status, 503);
+  assert.equal((await call("POST", "/api/notices", { kind: "absent", day: "2026-11-10", reason: "x" }, staff)).status, 200);
+  await db.close();
+});

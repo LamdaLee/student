@@ -477,3 +477,8 @@ p.hint {
 [hidden] {
   display: none !important;
 }
+.block-link {
+  display: block;
+  text-decoration: none;
+  margin: 8px 0;
+}
