@@ -585,3 +585,37 @@ test("알림 키가 없으면 알림만 꺼지고 나머지는 동작한다", as
   assert.equal((await call("POST", "/api/notices", { kind: "absent", day: "2026-11-10", reason: "x" }, staff)).status, 200);
   await db.close();
 });
+
+test("알림 키는 처음 쓸 때 만들어 DB 에 저장하고, 서버가 여러 개여도 같은 키를 쓴다", async () => {
+  const db = await openDb({ url: "", file: ":memory:" });
+  const prev = [process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY];
+  delete process.env.VAPID_PUBLIC_KEY;
+  delete process.env.VAPID_PRIVATE_KEY;
+  try {
+    const lp = fakeLunchpass();
+    lp.add("김운영", "admin", "OTHER", { role: "admin" });
+    const make = () => createApp(db, { now: () => T0, lunchpass: lp, secureCookie: false });
+    const call = async (app, method, path, body, cookie) => {
+      const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+      Object.assign(req, { method, url: path, headers: { host: "x", ...(body ? { "content-type": "application/json" } : {}), ...(cookie ? { cookie } : {}) }, socket: {} });
+      const res = {};
+      await app(req, { writeHead: (s, h) => Object.assign(res, { s, h }), end: (d) => (res.d = d) });
+      return { status: res.s, json: res.d ? JSON.parse(res.d) : null, cookie: res.h?.["Set-Cookie"]?.split(";")[0] };
+    };
+    const [a, b] = [make(), make()];
+    const cookie = (await call(a, "POST", "/api/auth/login", { loginId: "admin", password: PW })).cookie;
+    const [ka, kb] = await Promise.all([call(a, "GET", "/api/push", undefined, cookie), call(b, "GET", "/api/push", undefined, cookie)]);
+    assert.equal(ka.json.enabled, true);
+    assert.match(ka.json.publicKey, /^[A-Za-z0-9_-]{80,}$/);
+    assert.equal(kb.json.publicKey, ka.json.publicKey);
+    // 개인 키는 화면 설정으로 나가지 않는다
+    const me = await call(a, "GET", "/api/me", undefined, cookie);
+    assert.equal(JSON.stringify(me.json).includes("vapid"), false);
+    const stored = await db.get("SELECT value FROM settings WHERE key = 'vapid_public'");
+    assert.equal(stored.value, ka.json.publicKey);
+  } finally {
+    if (prev[0] !== undefined) process.env.VAPID_PUBLIC_KEY = prev[0];
+    if (prev[1] !== undefined) process.env.VAPID_PRIVATE_KEY = prev[1];
+    await db.close();
+  }
+});
