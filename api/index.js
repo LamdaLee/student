@@ -19,6 +19,6 @@ export default async function handler(req, res) {
     console.error(err);
     res.statusCode = 500;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.end(JSON.stringify({ error: "서버 설정을 확인해 주세요. (DATABASE_URL, AUTH_SECRET)" }));
+    res.end(JSON.stringify({ error: "서버 설정을 확인해 주세요. (DATABASE_URL 데이터베이스 연결, PORTAL_SECRET)" }));
   }
 }
