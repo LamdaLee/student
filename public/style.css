@@ -359,30 +359,6 @@ textarea {
 .big-state.out .state {
   color: var(--warn);
 }
-.restaurants {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.restaurant {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-  margin: 10px 0;
-}
-.restaurant.mine {
-  border: 2px solid var(--primary);
-}
-.count {
-  font-weight: 800;
-  font-size: 18px;
-  color: var(--primary);
-}
-.random:not(:empty) {
-  margin-top: 12px;
-  font-size: 17px;
-}
 .reply.staff {
   border-left: 4px solid var(--primary);
 }
@@ -500,26 +476,4 @@ p.hint {
 }
 [hidden] {
   display: none !important;
-}
-.num {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: #2b8ff0;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 800;
-  margin-right: 2px;
-}
-.map img {
-  display: block;
-  width: 100%;
-  height: auto;
-  border-radius: 10px;
-  margin-top: 4px;
-  background: #fff;
 }

@@ -204,52 +204,17 @@ for (const kind of ["sqlite", "postgres"]) {
       t.clock.t = T0;
     });
 
-    test("점심: 약도의 9개 식당만, 추가는 운영진만", async () => {
-      let r = await t.call("GET", "/api/lunch", undefined, { cookie: dm });
-      assert.deepEqual(
-        r.json.restaurants.map((x) => `${x.num} ${x.name}`),
-        ["1 복록수", "2 조선명가", "3 3일소고기국밥", "4 마마김밥", "5 칼국수 만드는 사람들", "6 오류동 꼬마김밥", "7 7930 손님식탁", "8 교반", "9 파스토보이"],
-      );
-      assert.match(r.json.restaurants[0].mapUrl, /^https:\/\/naver\.me\//);
-      // 훈련생은 식당을 추가할 수 없다.
-      assert.equal((await t.call("POST", "/api/restaurants", { name: "새 식당" }, { cookie: dm })).status, 404);
-      assert.equal((await t.call("POST", "/api/admin/restaurants", { name: "새 식당" }, { cookie: dm })).status, 403);
-      assert.equal((await t.call("POST", "/api/admin/restaurants", { name: "교반" }, { cookie: staff })).status, 409);
-      assert.equal((await t.call("POST", "/api/admin/restaurants", { name: "x", mapUrl: "javascript:alert(1)" }, { cookie: staff })).status, 400);
-      const added = await t.call("POST", "/api/admin/restaurants", { name: "새 식당", category: "한식", num: 10 }, { cookie: staff });
-      assert.equal(added.status, 200);
-      r = await t.call("GET", "/api/lunch", undefined, { cookie: dm });
-      assert.equal(r.json.restaurants.at(-1).name, "새 식당");
-      assert.equal((await t.call("POST", `/api/admin/restaurants/${added.json.id}`, { active: false }, { cookie: staff })).status, 200);
-
-      const a = { json: { id: r.json.restaurants.find((x) => x.name === "복록수").id } };
-      const b = { json: { id: r.json.restaurants.find((x) => x.name === "마마김밥").id } };
-      assert.equal((await t.call("POST", "/api/lunch/pick", { restaurantId: a.json.id }, { cookie: dm })).status, 200);
-      assert.equal((await t.call("POST", "/api/lunch/pick", { restaurantId: a.json.id }, { cookie: ax })).status, 200);
-      assert.equal((await t.call("POST", "/api/lunch/pick", { restaurantId: b.json.id }, { cookie: ax })).status, 200); // 바꾸기
-      r = await t.call("GET", "/api/lunch", undefined, { cookie: dm });
-      const han = r.json.restaurants.find((x) => x.id === a.json.id);
-      assert.equal(han.count, 1);
-      assert.deepEqual(han.byClass, { DM: 1 });
-      assert.equal(han.people[0].me, true);
-      assert.equal(r.json.myPick, a.json.id);
-      assert.equal(r.json.restaurants.find((x) => x.id === b.json.id).count, 1);
-
-      assert.equal((await t.call("POST", "/api/lunch/pick", { restaurantId: null }, { cookie: dm })).status, 200);
-      r = await t.call("GET", "/api/lunch", undefined, { cookie: dm });
-      assert.equal(r.json.myPick, null);
-
-      // 운영진이 숨기면 목록에서 빠지고 선택할 수 없다.
-      assert.equal((await t.call("POST", `/api/admin/restaurants/${b.json.id}`, { active: false }, { cookie: staff })).status, 200);
-      r = await t.call("GET", "/api/lunch", undefined, { cookie: dm });
-      assert.equal(r.json.restaurants.length, 8);
-      assert.equal((await t.call("POST", "/api/lunch/pick", { restaurantId: b.json.id }, { cookie: dm })).status, 404);
-
-      // 다음 날은 새로 정한다.
-      t.clock.t = T0 + 86400000;
-      r = await t.call("GET", "/api/lunch", undefined, { cookie: ax });
-      assert.equal(r.json.myPick, null);
-      t.clock.t = T0;
+    test("점심은 런치패스로 연결한다", async () => {
+      // 포털에는 점심 API 가 없고, 런치패스 주소만 내려준다.
+      assert.equal((await t.call("GET", "/api/lunch", undefined, { cookie: dm })).status, 404);
+      const me = await t.call("GET", "/api/me", undefined, { cookie: dm });
+      assert.equal(me.json.settings.lunchUrl, "https://matzip-lamda7.vercel.app/");
+      assert.equal((await t.call("POST", "/api/admin/settings", { lunchUrl: "javascript:alert(1)" }, { cookie: staff })).status, 400);
+      assert.equal((await t.call("POST", "/api/admin/settings", { lunchUrl: "https://lunch.example.com" }, { cookie: staff })).status, 200);
+      assert.equal((await t.call("GET", "/api/me", undefined, { cookie: dm })).json.settings.lunchUrl, "https://lunch.example.com/");
+      // 비우면 기본 주소로 돌아간다.
+      await t.call("POST", "/api/admin/settings", { lunchUrl: "" }, { cookie: staff });
+      assert.equal((await t.call("GET", "/api/me", undefined, { cookie: dm })).json.settings.lunchUrl, "https://matzip-lamda7.vercel.app/");
     });
 
     test("문의게시판: 공개·비공개, 답변, 삭제", async () => {

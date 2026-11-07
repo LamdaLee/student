@@ -130,6 +130,8 @@ function render() {
   if (settings.notice) $("#banner").append(h("div", { class: "banner" }, "📢 ", settings.notice));
   const [name, ...rest] = (location.hash.slice(1) || "home").split("/");
   for (const a of tabs.querySelectorAll("a")) a.classList.toggle("on", a.dataset.tab === name);
+  const lunchTab = tabs.querySelector('[data-tab="lunch"]');
+  Object.assign(lunchTab, { href: settings.lunchUrl, target: "_blank", rel: "noopener" });
   const pages = { home: renderHome, notice: renderNotice, out: renderOut, lunch: renderLunch, qna: renderQna, admin: renderAdmin };
   (pages[name] || renderHome)(rest);
   window.scrollTo(0, 0);
@@ -216,7 +218,13 @@ function renderSetup() {
 async function renderHome() {
   const { member, settings, today } = state.me;
   const outCard = h("section", { class: "card" }, h("h2", {}, "🚶 외출"), loading());
-  const lunchCard = h("section", { class: "card" }, h("h2", {}, "🍚 오늘 점심"), loading());
+  const lunchCard = h(
+    "section",
+    { class: "card" },
+    h("h2", {}, "🍚 오늘 점심"),
+    h("p", { class: "muted" }, "점심 식당 선택은 런치패스에서 해요. (런치패스 학번·비밀번호로 로그인)"),
+    h("a", { class: "btn block", href: settings.lunchUrl, target: "_blank", rel: "noopener" }, "런치패스 열기 ↗"),
+  );
   const noticeCard = h("section", { class: "card" }, h("h2", {}, "📅 내 출결 알림"), loading());
   const qnaCard = h("section", { class: "card" }, h("h2", {}, "💬 최근 문의"), loading());
 
@@ -255,9 +263,8 @@ async function renderHome() {
     ),
   );
 
-  const [outings, lunch, notices, posts] = await Promise.allSettled([
+  const [outings, notices, posts] = await Promise.allSettled([
     api("/api/outings"),
-    api("/api/lunch"),
     api("/api/notices"),
     api("/api/posts"),
   ]);
@@ -283,16 +290,6 @@ async function renderHome() {
         },
         cur ? "복귀하기" : "외출 기록하러 가기",
       ),
-    );
-  }
-  if (lunch.status === "fulfilled") {
-    const mine = lunch.value.restaurants.find((r) => r.id === lunch.value.myPick);
-    lunchCard.replaceChildren(
-      h("h2", {}, "🍚 오늘 점심"),
-      mine
-        ? h("p", {}, h("strong", {}, mine.name), ` · 나 포함 ${mine.count}명`)
-        : h("p", { class: "muted" }, "아직 정하지 않았어요."),
-      h("a", { class: "btn block", href: "#lunch" }, mine ? "바꾸기 / 누가 가는지 보기" : "점심 정하기"),
     );
   }
   if (notices.status === "fulfilled") {
@@ -522,78 +519,18 @@ async function renderOut() {
 }
 
 // ---------------- 점심 ----------------
-async function renderLunch() {
-  page("오늘 점심", loading());
-  const r = await api("/api/lunch");
-  const pick = (id) =>
-    action(async () => {
-      await api("/api/lunch/pick", { restaurantId: id });
-      toast(id ? "점심을 정했습니다." : "선택을 취소했습니다.");
-      renderLunch();
-    });
-  const label = (x) => [x.num ? h("span", { class: "num" }, x.num) : null, h("strong", {}, x.name)];
-  const randomBox = h("div", { class: "random" });
-  const roll = () => {
-    if (!r.restaurants.length) return;
-    const choice = r.restaurants[Math.floor(Math.random() * r.restaurants.length)];
-    randomBox.replaceChildren(
-      h("p", { class: "row" }, "🎲 오늘은 ", label(choice), choice.category ? ` (${choice.category})` : "", " 어때요?"),
-      h("div", { class: "row-btns" }, h("button", { class: "btn primary small", onclick: pick(choice.id) }, "여기로 정하기"), h("button", { class: "btn small", onclick: roll }, "다시 뽑기")),
-    );
-  };
-  const cards = r.restaurants.map((x) => {
-    const mine = x.id === r.myPick;
-    const classes = Object.entries(x.byClass).map(([c, n]) => `${c} ${n}`).join(" · ");
-    return h(
-      "li",
-      { class: `restaurant${mine ? " mine" : ""}` },
-      h(
-        "div",
-        { class: "row" },
-        h("div", { class: "grow row" }, label(x), h("span", { class: "muted small" }, x.category)),
-        h("span", { class: "count" }, `${x.count}명`),
-      ),
-      x.count ? h("p", { class: "muted small" }, classes, " — ", x.people.map((p) => p.name).join(", ")) : null,
-      h(
-        "div",
-        { class: "row-btns" },
-        mine
-          ? h("button", { class: "btn small", onclick: pick(null) }, "선택 취소")
-          : h("button", { class: "btn primary small", onclick: pick(x.id) }, r.myPick ? "여기로 바꾸기" : "여기 갈래요"),
-        x.mapUrl ? h("a", { class: "btn small", href: x.mapUrl, target: "_blank", rel: "noopener" }, "네이버 지도") : null,
-      ),
-    );
-  });
-  let mapOpen = true;
-  try {
-    mapOpen = localStorage.getItem("lunch-map") !== "closed";
-  } catch {}
-  const map = h(
-    "details",
-    {
-      class: "card map",
-      open: mapOpen,
-      ontoggle: (ev) => {
-        try {
-          localStorage.setItem("lunch-map", ev.currentTarget.open ? "open" : "closed");
-        } catch {}
-      },
-    },
-    h("summary", {}, "📍 식당 약도 (교육센터 주변)"),
-    h("a", { href: "/lunch-map.jpg", target: "_blank", rel: "noopener" }, h("img", { src: "/lunch-map.jpg", alt: "예람인재교육센터 주변 점심 식당 약도. 번호는 아래 식당 목록 번호와 같습니다.", loading: "lazy", width: "1000", height: "1414" })),
-    h("p", { class: "muted small" }, "그림을 누르면 크게 볼 수 있어요. 점심은 약도에 있는 식당에서만 이용할 수 있습니다."),
-  );
+// 점심은 런치패스(별도 앱)에서 합니다. 하단 탭은 런치패스를 바로 열고, 이 화면은 #lunch 로 들어온 경우용입니다.
+function renderLunch() {
+  const url = state.me.settings.lunchUrl;
   page(
     "오늘 점심",
-    h("p", { class: "muted sub" }, `${fmtDay(r.today)} · 누가 어디 가는지 보고 같이 정해요.`),
     h(
       "section",
       { class: "card" },
-      h("button", { class: "btn block", onclick: roll, disabled: !r.restaurants.length }, "🎲 메뉴 고민될 때 무작위로 뽑기"),
-      randomBox,
+      h("p", {}, "점심 식당 선택·인원 확인은 ", h("strong", {}, "런치패스"), "에서 해요."),
+      h("p", { class: "muted small" }, "런치패스는 이 포털과 따로 로그인합니다(학번·비밀번호). 오전 9시부터 12시 전까지 선택·변경할 수 있어요."),
+      h("a", { class: "btn primary block", href: url, target: "_blank", rel: "noopener" }, "런치패스 열기 ↗"),
     ),
-    cards.length ? h("ul", { class: "restaurants" }, cards) : h("p", { class: "card muted" }, "지금 이용할 수 있는 식당이 없습니다."),
-    map,
   );
 }
 
@@ -715,13 +652,12 @@ async function renderAdmin([tab = "day"]) {
   const tabs = [
     ["day", "현황"],
     ["members", "명단·코드"],
-    ["restaurants", "식당"],
     ["settings", "설정"],
   ];
   const nav = h("div", { class: "seg" }, tabs.map(([k, l]) => h("a", { href: `#admin/${k}`, class: k === tab ? "on" : null }, l)));
   const body = h("div", {}, loading());
   page("운영 관리", nav, body);
-  const fn = { day: adminDay, members: adminMembers, restaurants: adminRestaurants, settings: adminSettings }[tab] || adminDay;
+  const fn = { day: adminDay, members: adminMembers, settings: adminSettings }[tab] || adminDay;
   try {
     await fn(body);
   } catch (err) {
@@ -794,18 +730,6 @@ async function adminDay(body, date) {
       { class: "card" },
       h("h2", {}, "다음 7일 출결 알림"),
       r.upcoming.length ? h("ul", { class: "list" }, r.upcoming.map((n) => noticeItem(n, r.today, check(n)))) : h("p", { class: "muted" }, "없습니다."),
-    ),
-    h(
-      "section",
-      { class: "card" },
-      h("h2", {}, "점심"),
-      r.lunch.length
-        ? h(
-            "ul",
-            { class: "list" },
-            r.lunch.map((x) => h("li", { class: "row" }, h("strong", { class: "grow" }, x.name), h("span", { class: "muted small" }, Object.entries(x.byClass).map(([c, n]) => `${c} ${n}`).join(" · ")), h("span", { class: "count" }, `${x.count}명`))),
-          )
-        : h("p", { class: "muted" }, "아직 선택이 없습니다."),
     ),
   );
 }
@@ -972,95 +896,10 @@ async function adminMembers(body) {
   );
 }
 
-async function adminRestaurants(body) {
-  const r = await api("/api/admin/restaurants");
-  const fields = (x = {}) => ({
-    num: h("input", { type: "number", min: "0", max: "99", inputmode: "numeric", value: x.num ?? "", placeholder: "약도 번호" }),
-    name: h("input", { value: x.name ?? "", maxlength: "40", required: true, placeholder: "식당 이름" }),
-    category: h("input", { value: x.category ?? "", maxlength: "20", placeholder: "종류 예) 한식" }),
-    mapUrl: h("input", { type: "url", value: x.mapUrl ?? "", placeholder: "지도 링크", maxlength: "500" }),
-  });
-  const labeled = (f) => [
-    h("label", { class: "field" }, h("span", {}, "약도 번호"), f.num),
-    h("label", { class: "field" }, h("span", {}, "식당 이름"), f.name),
-    h("label", { class: "field" }, h("span", {}, "종류"), f.category),
-    h("label", { class: "field" }, h("span", {}, "지도 링크"), f.mapUrl),
-  ];
-  const values = (f) => ({ num: Number(f.num.value || 0), name: f.name.value, category: f.category.value, mapUrl: f.mapUrl.value });
-  const nf = fields();
-  body.replaceChildren(
-    h("p", { class: "muted small" }, "점심은 정해진 식당에서만 가능해서 식당 추가·수정은 운영진만 할 수 있습니다. 번호는 약도의 번호와 맞춰 주세요. 문을 닫은 식당은 숨기면 됩니다."),
-    h(
-      "section",
-      { class: "card" },
-      h(
-        "ul",
-        { class: "list" },
-        r.restaurants.map((x) => {
-          const f = fields(x);
-          return h(
-            "li",
-            { class: `member${x.active ? "" : " inactive"}` },
-            h(
-              "details",
-              {},
-              h("summary", {}, x.num ? h("span", { class: "num" }, x.num) : null, " ", x.name, " ", h("span", { class: "muted small" }, x.category, x.active ? "" : " · 숨김")),
-              h(
-                "form",
-                {
-                  onsubmit: action(async () => {
-                    await api(`/api/admin/restaurants/${x.id}`, values(f));
-                    toast("저장했습니다.");
-                    adminRestaurants(body);
-                  }),
-                },
-                labeled(f),
-                h(
-                  "div",
-                  { class: "row-btns" },
-                  h("button", { class: "btn primary small" }, "저장"),
-                  h(
-                    "button",
-                    {
-                      type: "button",
-                      class: "btn small",
-                      onclick: action(async () => {
-                        await api(`/api/admin/restaurants/${x.id}`, { active: !x.active });
-                        adminRestaurants(body);
-                      }),
-                    },
-                    x.active ? "숨기기" : "다시 보이기",
-                  ),
-                ),
-              ),
-            ),
-          );
-        }),
-      ),
-    ),
-    h(
-      "details",
-      { class: "card" },
-      h("summary", {}, "식당 추가"),
-      h(
-        "form",
-        {
-          onsubmit: action(async () => {
-            await api("/api/admin/restaurants", values(nf));
-            toast("추가했습니다.");
-            adminRestaurants(body);
-          }),
-        },
-        labeled(nf),
-        h("button", { class: "btn primary" }, "추가"),
-      ),
-    ),
-  );
-}
-
 async function adminSettings(body) {
   const s = state.me.settings;
   const lms = h("input", { type: "url", value: s.lmsUrl, placeholder: "https://…" });
+  const lunch = h("input", { type: "url", value: s.lunchUrl, placeholder: "https://matzip-lamda7.vercel.app/" });
   const notice = h("textarea", { rows: "2", maxlength: "300", placeholder: "모든 화면 위에 보이는 공지 (비우면 숨김)" });
   notice.value = s.notice;
   const links = h("textarea", { rows: "4", placeholder: "한 줄에 하나: 이름 | 주소\n예) 시간표 | https://…" });
@@ -1079,13 +918,14 @@ async function adminSettings(body) {
               const i = l.lastIndexOf("|");
               return i < 0 ? { label: "", url: l } : { label: l.slice(0, i).trim(), url: l.slice(i + 1).trim() };
             });
-          const r = await api("/api/admin/settings", { lmsUrl: lms.value, notice: notice.value, links: parsed });
+          const r = await api("/api/admin/settings", { lmsUrl: lms.value, lunchUrl: lunch.value, notice: notice.value, links: parsed });
           state.me.settings = r.settings;
           toast("저장했습니다.");
           render();
         }),
       },
       h("label", { class: "field" }, h("span", {}, "LMS 주소"), lms),
+      h("label", { class: "field" }, h("span", {}, "런치패스 주소 (점심 탭이 여는 곳)"), lunch),
       h("label", { class: "field" }, h("span", {}, "공지"), notice),
       h("label", { class: "field" }, h("span", {}, "그 밖의 바로가기 (최대 8개)"), links),
       h("button", { class: "btn primary block" }, "저장"),
