@@ -143,7 +143,7 @@ function loading() {
 
 // ---------------- 인증 ----------------
 function renderLogin() {
-  const loginId = h("input", { name: "loginId", autocomplete: "username", autocapitalize: "none", placeholder: "학번 / 로그인 ID", maxlength: "40", required: true, "aria-label": "학번 또는 로그인 ID" });
+  const loginId = h("input", { name: "loginId", autocomplete: "username", autocapitalize: "none", placeholder: "학번 또는 이름", maxlength: "40", required: true, "aria-label": "학번 또는 이름" });
   const password = h("input", { name: "password", type: "password", autocomplete: "current-password", placeholder: "비밀번호", maxlength: "128", required: true, "aria-label": "비밀번호" });
   const done = async (r) => {
     await loadMe();
@@ -162,13 +162,14 @@ function renderLogin() {
       }),
     },
     h("h2", {}, "런치패스 계정으로 로그인"),
-    h("p", { class: "muted" }, "런치패스와 같은 학번·비밀번호로 한 번만 로그인하면, 이 기기에서는 계속 로그인된 상태로 쓸 수 있어요. 점심 탭을 누르면 런치패스도 자동으로 로그인됩니다."),
+    h("p", { class: "muted" }, "런치패스와 같은 계정(학번 또는 이름)과 비밀번호로 한 번만 로그인하면, 이 기기에서는 계속 로그인된 상태로 쓸 수 있어요. 점심 탭을 누르면 런치패스도 자동으로 로그인됩니다."),
     loginId,
     password,
     h("button", { class: "btn primary block" }, "로그인"),
     h(
       "ul",
       { class: "hint" },
+      h("li", {}, "학번이 아직 없으면 이름으로 로그인하세요. 같은 이름이 있으면 운영진에게 받은 ID로 로그인합니다."),
       h("li", {}, "계정은 운영진이 런치패스에 등록합니다. 처음이라면 운영진에게 받은 초기 비밀번호(숫자 4자리)로 로그인한 뒤 새 비밀번호를 정해 주세요."),
       h("li", {}, "비밀번호를 잊었다면 운영진에게 초기화를 요청하세요."),
       h("li", {}, "아이폰에서 '홈 화면에 추가'로 만든 아이콘은 사파리와 따로 저장되어, 아이콘으로 처음 열 때 한 번 더 로그인해야 합니다."),
