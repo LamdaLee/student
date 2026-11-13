@@ -81,7 +81,7 @@ function addDays(day, n) {
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
-const KIND_LABEL = { absent: "결석", late: "지각", early: "조퇴" };
+const KIND_LABEL = { absent: "결석", late: "지각", early: "조퇴", out: "외출" };
 
 const state = { me: null };
 // 런치패스의 'OTHER' 반은 교수·강사·운영진입니다.
@@ -287,9 +287,9 @@ async function renderHome() {
     noticeCard.replaceChildren(
       h("h2", {}, "📅 내 출결 알림"),
       upcoming.length
-        ? h("ul", { class: "list" }, upcoming.slice(0, 3).map((n) => noticeItem(n, today)))
-        : h("p", { class: "muted" }, "예정된 결석·지각·조퇴가 없습니다."),
-      h("a", { class: "btn block", href: "#notice" }, "결석·지각·조퇴 알리기"),
+        ? h("ul", { class: "list" }, upcoming.slice(0, 3).map((n) => noticeItem(n, today, returnButton(n, today, renderHome))))
+        : h("p", { class: "muted" }, "예정된 결석·지각·조퇴·외출이 없습니다."),
+      h("a", { class: "btn block", href: "#notice" }, "결석·지각·조퇴·외출 알리기"),
     );
   }
   if (posts.status === "fulfilled") {
@@ -339,7 +339,7 @@ function installCard() {
 }
 
 // ---------------- 출결 알림 ----------------
-function noticeItem(n, today, extra) {
+function noticeItem(n, today, ...extra) {
   const rel = relDay(n.day, today);
   return h(
     "li",
@@ -348,11 +348,32 @@ function noticeItem(n, today, extra) {
     h(
       "div",
       { class: "grow" },
-      h("div", {}, n.name ? h("strong", {}, `${n.name} `) : null, n.name ? chip(n.class) : null, " ", fmtDay(n.day), rel ? ` (${rel})` : "", n.time ? ` · ${n.time}` : ""),
+      h("div", {}, n.name ? h("strong", {}, `${n.name} `) : null, n.name ? chip(n.class) : null, " ", fmtDay(n.day), rel ? ` (${rel})` : "", n.time ? ` · ${n.time}${n.endTime ? `~${n.endTime}` : ""}` : ""),
       h("div", { class: "muted small" }, n.reason),
+      n.kind === "out" && n.returnedAt ? h("div", { class: "ok small" }, `✔ ${fmtTime(n.returnedAt)} 다녀왔습니다`) : null,
+      n.kind === "out" && !n.returnedAt && n.name && n.day === today && n.endTime && nowClock() > n.endTime
+        ? h("div", { class: "warn small" }, "돌아올 시각이 지났는데 아직 복귀 보고가 없어요")
+        : null,
     ),
     n.checked ? h("span", { class: "ok small" }, "확인됨") : null,
     extra,
+  );
+}
+const nowClock = () => fmtTime(Date.now());
+// 오늘 미리 알린 외출에서 돌아왔을 때 누르는 버튼
+function returnButton(n, today, done) {
+  if (n.kind !== "out" || n.day !== today || n.returnedAt) return null;
+  return h(
+    "button",
+    {
+      class: "btn primary small",
+      onclick: action(async () => {
+        await api(`/api/notices/${n.id}/return`, {});
+        toast("운영진에게 복귀를 알렸습니다.");
+        done();
+      }),
+    },
+    "다녀왔습니다",
   );
 }
 
@@ -364,17 +385,22 @@ async function renderNotice() {
     ["late", "지각"],
     ["early", "조퇴"],
     ["absent", "결석"],
+    ["out", "외출"],
   ];
   const timeLabel = h("span", {});
   const time = h("input", { type: "time", value: "09:30" });
   const timeWrap = h("label", { class: "field" }, timeLabel, time);
+  const endTime = h("input", { type: "time", value: "14:00" });
+  const endWrap = h("label", { class: "field" }, h("span", {}, "돌아올 예정 시각"), endTime);
   const setKind = (k) => {
     selected = k;
     for (const b of kind.children) b.classList.toggle("on", b.dataset.kind === k);
     timeWrap.hidden = k === "absent";
+    endWrap.hidden = k !== "out";
     timeLabel.textContent = k === "late" ? "도착 예정 시각" : "나갈 예정 시각";
-    if (k === "early" && time.value === "09:30") time.value = "15:00";
-    if (k === "late" && time.value === "15:00") time.value = "09:30";
+    // 처음 값 그대로면 종류에 맞는 흔한 시각으로 바꿔 둡니다.
+    const defaults = { late: "09:30", early: "15:00", out: "13:00" };
+    if (Object.values(defaults).includes(time.value) && defaults[k]) time.value = defaults[k];
   };
   for (const [k, label] of kinds)
     kind.append(h("button", { type: "button", "data-kind": k, onclick: () => setKind(k) }, label));
@@ -387,7 +413,13 @@ async function renderNotice() {
     {
       class: "card",
       onsubmit: action(async () => {
-        await api("/api/notices", { kind: selected, day: day.value, time: selected === "absent" ? null : time.value, reason: reason.value });
+        await api("/api/notices", {
+          kind: selected,
+          day: day.value,
+          time: selected === "absent" ? null : time.value,
+          endTime: selected === "out" ? endTime.value : null,
+          reason: reason.value,
+        });
         toast("운영진에게 알렸습니다.");
         reason.value = "";
         loadList();
@@ -397,12 +429,13 @@ async function renderNotice() {
     kind,
     h("label", { class: "field" }, h("span", {}, "날짜"), day),
     timeWrap,
+    endWrap,
     h("label", { class: "field" }, h("span", {}, "사유"), reason),
     h("button", { class: "btn primary block" }, "알리기"),
-    h("p", { class: "hint" }, "공가·병결 서류 제출과 공식 출결은 LMS에서 따로 진행해 주세요. 여기서는 운영진에게 미리 알리는 용도입니다."),
+    h("p", { class: "hint" }, "공가·병결 서류 제출과 공식 출결은 LMS에서 따로 진행해 주세요. 여기서는 운영진에게 미리 알리는 용도입니다. 외출은 돌아오면 아래 내 알림에서 '다녀왔습니다'를 눌러 주세요. 운영진에게 바로 알림이 갑니다."),
   );
   setKind("late");
-  page("결석·지각·조퇴 알림", form, h("section", { class: "card" }, h("h2", {}, "내 알림"), listBox));
+  page("결석·지각·조퇴·외출 알림", form, h("section", { class: "card" }, h("h2", {}, "내 알림"), listBox));
 
   async function loadList() {
     const r = await api("/api/notices");
@@ -416,7 +449,8 @@ async function renderNotice() {
               noticeItem(
                 n,
                 r.today,
-                n.day >= r.today
+                returnButton(n, r.today, loadList),
+                (n.day >= r.today && !n.returnedAt
                   ? h(
                       "button",
                       {
@@ -430,7 +464,7 @@ async function renderNotice() {
                       },
                       "취소",
                     )
-                  : null,
+                  : null),
               ),
             ),
           )
@@ -690,6 +724,7 @@ async function adminDay(body, date) {
       h("div", {}, h("b", {}, counts("absent")), h("span", {}, "결석 예정")),
       h("div", {}, h("b", {}, counts("late")), h("span", {}, "지각 예정")),
       h("div", {}, h("b", {}, counts("early")), h("span", {}, "조퇴 예정")),
+      h("div", {}, h("b", {}, counts("out")), h("span", {}, "외출 예정")),
       h("div", {}, h("b", {}, r.day === r.today ? nowOut.length : r.outings.length), h("span", {}, r.day === r.today ? "지금 외출" : "외출")),
     ),
     h(
@@ -821,7 +856,7 @@ function pushCard() {
     const info = await api("/api/push");
     const head = [
       h("h2", {}, "🔔 운영진 휴대폰 알림"),
-      h("p", { class: "muted small" }, "훈련생이 결석·지각·조퇴를 알리거나 취소할 때, 새 문의 글이나 댓글을 쓸 때 이 기기로 바로 알림이 와요. 알림을 누르면 해당 화면이 열립니다."),
+      h("p", { class: "muted small" }, "훈련생이 결석·지각·조퇴·외출을 알리거나 취소할 때, 새 문의 글이나 댓글을 쓸 때 이 기기로 바로 알림이 와요. 알림을 누르면 해당 화면이 열립니다."),
     ];
     if (!info.enabled)
       return fill(...head, h("p", { class: "warn small" }, "서버에 알림 키(VAPID)가 아직 설정되지 않았습니다. README 의 '운영진 휴대폰 알림' 설정을 확인해 주세요."));
