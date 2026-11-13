@@ -256,6 +256,46 @@ for (const kind of ["sqlite", "postgres"]) {
       assert.equal((await t.call("GET", "/api/notices", undefined, { cookie: ax })).json.notices.length, 0);
     });
 
+    test("외출 예고와 '다녀왔습니다' 보고", async () => {
+      const post = (body, cookie = dm) => t.call("POST", "/api/notices", body, { cookie });
+      // 나갈·돌아올 시각이 모두 있어야 하고, 돌아올 시각이 더 늦어야 한다
+      assert.equal((await post({ kind: "out", day: "2026-11-09", time: "13:00", reason: "은행" })).status, 400);
+      assert.equal((await post({ kind: "out", day: "2026-11-09", time: "13:00", endTime: "12:30", reason: "은행" })).status, 400);
+      const out = await post({ kind: "out", day: "2026-11-09", time: "13:00", endTime: "14:00", reason: "은행" });
+      assert.equal(out.status, 200);
+      const later = await post({ kind: "out", day: "2026-11-10", time: "11:00", endTime: "11:30", reason: "우체국" });
+      assert.equal(later.status, 200);
+
+      let mine = (await t.call("GET", "/api/notices", undefined, { cookie: dm })).json.notices;
+      const today = mine.find((n) => n.id === out.json.id);
+      assert.equal(today.kindLabel, "외출");
+      assert.equal(today.time, "13:00");
+      assert.equal(today.endTime, "14:00");
+      assert.equal(today.returnedAt, null);
+      let day = await t.call("GET", "/api/admin/day?date=2026-11-09", undefined, { cookie: staff });
+      assert.equal(day.json.notices.find((n) => n.id === out.json.id).endTime, "14:00");
+
+      // 남의 외출, 내일 외출, 외출이 아닌 알림은 보고할 수 없다
+      assert.equal((await t.call("POST", `/api/notices/${out.json.id}/return`, {}, { cookie: ax })).status, 404);
+      assert.equal((await t.call("POST", `/api/notices/${later.json.id}/return`, {}, { cookie: dm })).status, 404);
+      const late = await post({ kind: "late", day: "2026-11-09", time: "09:40", reason: "병원" }, ax);
+      assert.equal((await t.call("POST", `/api/notices/${late.json.id}/return`, {}, { cookie: ax })).status, 404);
+
+      t.clock.t = T0 + 4 * 3600000 + 5 * 60000; // 14:05
+      const back = await t.call("POST", `/api/notices/${out.json.id}/return`, {}, { cookie: dm });
+      assert.equal(back.status, 200);
+      assert.equal(back.json.returnedAt, t.clock.t);
+      // 한 번만, 보고 후에는 취소할 수 없다
+      assert.equal((await t.call("POST", `/api/notices/${out.json.id}/return`, {}, { cookie: dm })).status, 404);
+      assert.equal((await t.call("POST", `/api/notices/${out.json.id}/cancel`, {}, { cookie: dm })).status, 404);
+      day = await t.call("GET", "/api/admin/day?date=2026-11-09", undefined, { cookie: staff });
+      assert.equal(day.json.notices.find((n) => n.id === out.json.id).returnedAt, t.clock.t);
+      t.clock.t = T0;
+      // 정리: 다른 테스트에 영향 없도록 남은 알림 취소
+      await t.call("POST", `/api/notices/${later.json.id}/cancel`, {}, { cookie: dm });
+      await t.call("POST", `/api/notices/${late.json.id}/cancel`, {}, { cookie: ax });
+    });
+
     test("외출과 복귀", async () => {
       assert.equal((await t.call("POST", "/api/outings/end", {}, { cookie: dm })).status, 409);
       assert.equal((await t.call("POST", "/api/outings/start", { reason: "은행" }, { cookie: dm })).status, 200);
@@ -535,6 +575,16 @@ test("운영진 휴대폰 알림: 출결 알림·취소, 새 문의·댓글", as
   assert.equal(sent[0].title, "[지각 취소] 홍길동(DM)");
 
   sent.length = 0;
+  const out = await call("POST", "/api/notices", { kind: "out", day: "2026-11-09", time: "13:00", endTime: "14:00", reason: "은행" }, dm);
+  assert.equal(sent[0].title, "[외출] 홍길동(DM)");
+  assert.equal(sent[0].body, "11/9(월) 오늘 13:00~14:00 · 은행");
+  sent.length = 0;
+  await call("POST", `/api/notices/${out.json.id}/return`, {}, dm);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].title, "[외출 복귀] 홍길동(DM)");
+  assert.match(sent[0].body, /^다녀왔습니다 · \d\d:\d\d 복귀 \(예정 13:00~14:00\)$/);
+
+  sent.length = 0;
   const post = await call("POST", "/api/posts", { title: "노트북 대여", body: "가능한가요?", private: true }, dm);
   assert.equal(sent.length, 2);
   assert.equal(sent[0].title, "[새 문의 · 비공개] 홍길동(DM)");
@@ -618,4 +668,27 @@ test("알림 키는 처음 쓸 때 만들어 DB 에 저장하고, 서버가 여�
     if (prev[1] !== undefined) process.env.VAPID_PRIVATE_KEY = prev[1];
     await db.close();
   }
+});
+
+test("예전 DB에도 외출 예고 칸(end_time·returned_at)이 추가된다", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { DatabaseSync } = await import("node:sqlite");
+  const dir = mkdtempSync(join(tmpdir(), "portal-"));
+  const file = join(dir, "old.sqlite");
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE absence_notices (id TEXT PRIMARY KEY, member_id TEXT NOT NULL, kind TEXT NOT NULL, day TEXT NOT NULL,
+    time TEXT, reason TEXT NOT NULL, created_at BIGINT NOT NULL, canceled_at BIGINT, checked_at BIGINT, checked_by TEXT);
+    INSERT INTO absence_notices VALUES ('a', 'lp1', 'late', '2026-11-09', '09:40', '병원', 1, NULL, NULL, NULL);`);
+  old.close();
+  for (let i = 0; i < 2; i++) {
+    const db = await openDb({ url: "", file });
+    const row = await db.get("SELECT * FROM absence_notices WHERE id = 'a'");
+    assert.equal(row.reason, "병원");
+    assert.equal(row.end_time, null);
+    assert.equal(row.returned_at, null);
+    await db.close();
+  }
+  rmSync(dir, { recursive: true, force: true });
 });

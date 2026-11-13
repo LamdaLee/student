@@ -313,6 +313,10 @@ textarea {
   background: #ede9fe;
   color: #6d28d9;
 }
+.tag.out {
+  background: #e0f2fe;
+  color: #0369a1;
+}
 .tag.done {
   background: #dcfae6;
   color: #067647;
