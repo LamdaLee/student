@@ -226,8 +226,10 @@ async function renderHome() {
       : isStaff()
         ? h("p", { class: "hint-box" }, "관리 → 설정에서 LMS 주소를 넣으면 여기에 바로가기 버튼이 생깁니다.")
         : null,
-    settings.links.length
-      ? h("div", { class: "links" }, settings.links.map((l) => h("a", { class: "btn small", href: l.url, target: "_blank", rel: "noopener" }, l.label)))
+    // '크게'로 지정한 바로가기는 LMS 버튼처럼 크게, 나머지는 작은 버튼으로
+    settings.links.filter((l) => l.big).map((l) => h("a", { class: "btn big-link block", href: l.url, target: "_blank", rel: "noopener" }, `${l.label} ↗`)),
+    settings.links.some((l) => !l.big)
+      ? h("div", { class: "links" }, settings.links.filter((l) => !l.big).map((l) => h("a", { class: "btn small", href: l.url, target: "_blank", rel: "noopener" }, l.label)))
       : null,
     outCard,
     lunchCard,
@@ -949,8 +951,8 @@ async function adminSettings(body) {
   const lms = h("input", { type: "url", value: s.lmsUrl, placeholder: "https://…" });
   const notice = h("textarea", { rows: "2", maxlength: "300", placeholder: "모든 화면 위에 보이는 공지 (비우면 숨김)" });
   notice.value = s.notice;
-  const links = h("textarea", { rows: "4", placeholder: "한 줄에 하나: 이름 | 주소\n예) 시간표 | https://…" });
-  links.value = s.links.map((l) => `${l.label} | ${l.url}`).join("\n");
+  const links = h("textarea", { rows: "4", placeholder: "한 줄에 하나: 이름 | 주소\n예) 시간표 | https://…\n크게 보이려면 끝에 | 크게\n예) 회고 | https://… | 크게" });
+  links.value = s.links.map((l) => `${l.label} | ${l.url}${l.big ? " | 크게" : ""}`).join("\n");
   body.replaceChildren(
     pushCard(),
     h(
@@ -963,8 +965,12 @@ async function adminSettings(body) {
             .map((l) => l.trim())
             .filter(Boolean)
             .map((l) => {
-              const i = l.lastIndexOf("|");
-              return i < 0 ? { label: "", url: l } : { label: l.slice(0, i).trim(), url: l.slice(i + 1).trim() };
+              // 이름 | 주소 [| 크게]
+              const parts = l.split("|").map((p) => p.trim());
+              const big = parts.length > 2 && parts.at(-1) === "크게";
+              if (big) parts.pop();
+              const url = parts.pop();
+              return { label: parts.join("|").trim(), url, ...(big ? { big: true } : {}) };
             });
           const r = await api("/api/admin/settings", { lmsUrl: lms.value, notice: notice.value, links: parsed });
           state.me.settings = r.settings;
@@ -975,6 +981,7 @@ async function adminSettings(body) {
       h("label", { class: "field" }, h("span", {}, "LMS 주소"), lms),
       h("label", { class: "field" }, h("span", {}, "공지"), notice),
       h("label", { class: "field" }, h("span", {}, "그 밖의 바로가기 (최대 8개)"), links),
+      h("p", { class: "hint" }, "줄 끝에 '| 크게'를 붙이면 홈 화면에서 LMS 버튼처럼 크게 보여요."),
       h("button", { class: "btn primary block" }, "저장"),
     ),
     h(

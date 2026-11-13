@@ -392,6 +392,19 @@ for (const kind of ["sqlite", "postgres"]) {
       assert.equal(me.json.settings.lmsUrl, "https://lms.example.com/login");
       assert.equal(me.json.settings.notice, "11/9 첫 수업은 9시까지!");
       assert.equal(me.json.settings.links[0].label, "시간표");
+      assert.equal(me.json.settings.links[0].big, undefined);
+      // '크게' 표시는 true 일 때만 저장
+      await t.call(
+        "POST",
+        "/api/admin/settings",
+        { links: [{ label: "회고", url: "https://example.com/r", big: true }, { label: "시간표", url: "https://example.com/t", big: "yes" }] },
+        { cookie: staff },
+      );
+      const links = (await t.call("GET", "/api/me", undefined, { cookie: dm })).json.settings.links;
+      assert.deepEqual(links, [
+        { label: "회고", url: "https://example.com/r", big: true },
+        { label: "시간표", url: "https://example.com/t" },
+      ]);
     });
 
     test("로그아웃하면 이 기기 쿠키만 끝난다", async () => {
